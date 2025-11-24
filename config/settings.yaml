@@ -1,0 +1,18 @@
+# Crawler Configuration
+
+# Delays between requests to same domain (seconds)
+# Not fully implemented in PoC (we process each domain once), but ready for expansion.
+delay_min: 1
+delay_max: 3
+
+# Discovery Settings
+tranco_limit: 10000
+common_crawl_limit: 2000
+
+# Crawler Settings
+request_timeout: 15
+max_redirects: 5
+max_retries: 2
+
+# Extractor Settings
+email_regex_strict: true

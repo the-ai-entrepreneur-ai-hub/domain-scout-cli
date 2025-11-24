@@ -1,0 +1,13 @@
+aiohttp
+aiodns
+aiosqlite
+beautifulsoup4
+fake-useragent
+lxml
+pandas
+pydantic
+requests
+tenacity
+httpx
+pyyaml
+chardet
