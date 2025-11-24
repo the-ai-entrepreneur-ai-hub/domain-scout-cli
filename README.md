@@ -4,15 +4,19 @@
 
 It was built to be robust, efficient, and respectful of website rules.
 
-## 🚀 Quick Start Guide
+## ⚡ Quick Start Guide
 
 Follow these simple steps to get the crawler running on your machine.
 
-### 1. Prerequisites
+### 1. Prepare the Folder
+Ensure you have the project files on your computer (unzipped if necessary).
+Open your terminal (Command Prompt or PowerShell) and **navigate inside this folder**.
+
+### 2. Prerequisites
 Make sure you have **Python** installed. If not, download it from [python.org](https://www.python.org/downloads/).
 
-### 2. Installation
-Open your terminal (Command Prompt or PowerShell) in this folder and run:
+### 3. Installation
+Run this command to install the necessary tools:
 
 ```bash
 pip install -r requirements.txt
