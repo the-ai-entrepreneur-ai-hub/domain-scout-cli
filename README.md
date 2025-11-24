@@ -8,9 +8,12 @@ It was built to be robust, efficient, and respectful of website rules.
 
 Follow these simple steps to get the crawler running on your machine.
 
-### 1. Prepare the Folder
-Ensure you have the project files on your computer (unzipped if necessary).
-Open your terminal (Command Prompt or PowerShell) and **navigate inside this folder**.
+### 1. Get the Code
+First, download the latest version of the code using git:
+```bash
+git clone https://github.com/the-ai-entrepreneur-ai-hub/domain-scout-cli.git
+cd domain-scout-cli
+```
 
 ### 2. Prerequisites
 Make sure you have **Python** installed. If not, download it from [python.org](https://www.python.org/downloads/).
