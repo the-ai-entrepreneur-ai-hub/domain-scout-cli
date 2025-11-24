@@ -1,5 +1,6 @@
 import aiosqlite
 from pathlib import Path
+from typing import Optional
 from src.utils import logger
 import asyncio
 
@@ -77,3 +78,24 @@ async def update_domain_status(domain_id: int, status: str):
             (status, domain_id)
         )
         await db.commit()
+
+async def get_sample_domains(tld: Optional[str] = None, limit: int = 50):
+    """
+    Fetches a sample of domains (optionally filtered by TLD) ordered by newest first.
+    """
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        if tld:
+            suffix = tld if tld.startswith('.') else f".{tld}"
+            like_pattern = f"%{suffix}"
+            cursor = await db.execute(
+                "SELECT domain, source, created_at FROM queue WHERE domain LIKE ? ORDER BY created_at DESC LIMIT ?",
+                (like_pattern, limit)
+            )
+        else:
+            cursor = await db.execute(
+                "SELECT domain, source, created_at FROM queue ORDER BY created_at DESC LIMIT ?",
+                (limit,)
+            )
+        rows = await cursor.fetchall()
+        return rows

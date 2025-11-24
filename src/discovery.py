@@ -39,20 +39,26 @@ async def ingest_tranco_domains(tld: str, limit: int = 1000):
     if not TRANCO_FILE.exists():
         download_tranco_list()
 
-    logger.info(f"Ingesting Tranco domains for TLD: {tld}")
+    logger.info(f"Ingesting Tranco domains for TLD: {tld or 'ANY'}")
     
     batch = []
     count = 0
     chunk_size = 100000
     
-    suffix = tld if tld.startswith('.') else f".{tld}"
+    use_filter = tld not in (None, "", "*", "all", "any")
+    suffix = None
+    if use_filter:
+        suffix = tld if tld.startswith('.') else f".{tld}"
     
     try:
         # Using pandas for fast CSV reading
         for chunk in pd.read_csv(TRANCO_FILE, header=None, names=['rank', 'domain'], chunksize=chunk_size):
-            matches = chunk[chunk['domain'].str.endswith(suffix, na=False)]
-            
-            for domain in matches['domain']:
+            if use_filter:
+                domain_iter = chunk[chunk['domain'].str.endswith(suffix, na=False)]['domain']
+            else:
+                domain_iter = chunk['domain']
+
+            for domain in domain_iter:
                 batch.append((domain, "TRANCO"))
                 count += 1
                 
@@ -72,6 +78,10 @@ async def ingest_tranco_domains(tld: str, limit: int = 1000):
 async def ingest_common_crawl_domains(tld: str, limit: int = 100):
     """Queries Common Crawl and pushes to DB."""
     logger.info(f"Searching Common Crawl for TLD: {tld}")
+
+    if tld in (None, "", "*", "all", "any"):
+        logger.info("Skipping Common Crawl for ANY-TLD mode to avoid huge responses.")
+        return
     
     try:
         async with httpx.AsyncClient(timeout=30) as client:
@@ -130,9 +140,13 @@ async def ingest_search_engine_domains(tld: str, limit: int = 50):
     """
     Lightweight search-engine fallback (DuckDuckGo HTML) to grab fresh domains.
     """
-    suffix = tld.lstrip(".")
-    query = f"site:{suffix} contact"
-    logger.info(f"Search engine fallback for {tld} (limit={limit})")
+    suffix = None
+    if tld not in (None, "", "*", "all", "any"):
+        suffix = tld.lstrip(".")
+        query = f"site:{suffix} contact"
+    else:
+        query = "company site contact"
+    logger.info(f"Search engine fallback for {tld or 'ANY'} (limit={limit})")
 
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119 Safari/537.36"
@@ -165,7 +179,7 @@ async def ingest_search_engine_domains(tld: str, limit: int = 50):
                 domain = parsed.netloc.split(":")[0]
                 if not domain or domain in seen:
                     continue
-                if not domain.endswith(f".{suffix}"):
+                if suffix and not domain.endswith(f".{suffix}"):
                     continue
 
                 seen.add(domain)
@@ -186,13 +200,10 @@ async def ingest_search_engine_domains(tld: str, limit: int = 50):
 
 async def run_discovery(tld: str, limit: int = 100):
     """Main discovery task."""
-    # 1. Tranco
+    # 1. Tranco (always)
     await ingest_tranco_domains(tld, limit)
     
-    # 2. Common Crawl (if needed or purely additive? PRD says Hybrid)
-    # Let's fetch some from CC as well to ensure coverage
-    # Logic: If limit is large, Tranco fills most. CC adds variety.
-    # We'll just run both for PoC to demonstrate hybrid nature.
+    # 2. Common Crawl (skip for ANY to avoid unbounded results)
     await ingest_common_crawl_domains(tld, limit // 2) # Fetch 50% limit from CC
 
     # 3. Search engine fallback (top ~50)

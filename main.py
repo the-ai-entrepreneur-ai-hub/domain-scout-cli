@@ -3,7 +3,7 @@ import sys
 import asyncio
 from pathlib import Path
 from src.discovery import run_discovery
-from src.database import init_db
+from src.database import init_db, get_sample_domains
 from src.utils import logger
 
 async def async_main():
@@ -13,8 +13,10 @@ async def async_main():
     
     # Discovery Command
     discover_parser = subparsers.add_parser('discover', help='Discover domains and populate DB')
-    discover_parser.add_argument("--tld", required=True, help="Top-Level Domain (e.g., .de)")
+    discover_parser.add_argument("--tld", required=True, help="Top-Level Domain (e.g., .de). Use 'all' or '*' for any TLD.")
     discover_parser.add_argument("--limit", type=int, default=100, help="Max domains to find")
+    discover_parser.add_argument("--print-sample", action="store_true", help="Print discovered domains after discovery")
+    discover_parser.add_argument("--print-limit", type=int, default=50, help="Number of domains to print with --print-sample")
     
     # Crawl Command
     crawl_parser = subparsers.add_parser('crawl', help='Crawl domains from DB')
@@ -34,13 +36,23 @@ async def async_main():
     await init_db()
     
     if args.task == 'discover':
-        tld = args.tld.strip()
-        if not tld.startswith('.'):
+        raw_tld = args.tld.strip()
+        any_mode = raw_tld.lower() in {"all", "any", "*", ""}
+        tld = None if any_mode else raw_tld
+        if tld and not tld.startswith('.'):
             tld = f".{tld}"
             
-        logger.info(f"Starting Discovery for {tld}")
+        logger.info(f"Starting Discovery for {tld or 'ANY'}")
         await run_discovery(tld, args.limit)
         logger.info("Discovery complete. Check 'queue' table in DB.")
+        if args.print_sample:
+            rows = await get_sample_domains(tld, args.print_limit)
+            if not rows:
+                logger.info("No domains available to print.")
+            else:
+                logger.info(f"Sample of discovered domains (up to {args.print_limit}):")
+                for row in rows:
+                    logger.info(f"{row['domain']} (source={row['source']})")
         
     elif args.task == 'crawl':
         from src.crawler import Crawler
