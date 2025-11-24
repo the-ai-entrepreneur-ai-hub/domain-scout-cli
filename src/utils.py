@@ -1,6 +1,8 @@
 import logging
 import sys
 from pathlib import Path
+from functools import lru_cache
+import yaml
 from colorama import init, Fore, Style
 
 # Init colorama for Windows support
@@ -52,3 +54,20 @@ def setup_logger(name: str = "crawler", log_level: int = logging.INFO) -> loggin
     return logger
 
 logger = setup_logger()
+
+@lru_cache()
+def load_settings() -> dict:
+    """
+    Loads YAML settings once and caches them for reuse.
+    """
+    settings_path = Path("config/settings.yaml")
+    if not settings_path.exists():
+        return {}
+
+    try:
+        with settings_path.open("r", encoding="utf-8") as f:
+            data = yaml.safe_load(f) or {}
+            return data
+    except Exception as exc:
+        logger.warning(f"Failed to load settings.yaml, using defaults: {exc}")
+        return {}

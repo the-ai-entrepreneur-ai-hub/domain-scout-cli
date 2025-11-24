@@ -4,7 +4,8 @@ import zipfile
 import io
 import asyncio
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import urlparse, parse_qs, unquote
+from bs4 import BeautifulSoup
 from .utils import logger
 from .database import insert_domains
 
@@ -125,6 +126,64 @@ async def ingest_common_crawl_domains(tld: str, limit: int = 100):
     except Exception as e:
         logger.error(f"Error querying Common Crawl: {e}")
 
+async def ingest_search_engine_domains(tld: str, limit: int = 50):
+    """
+    Lightweight search-engine fallback (DuckDuckGo HTML) to grab fresh domains.
+    """
+    suffix = tld.lstrip(".")
+    query = f"site:{suffix} contact"
+    logger.info(f"Search engine fallback for {tld} (limit={limit})")
+
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119 Safari/537.36"
+    }
+
+    try:
+        async with httpx.AsyncClient(timeout=20, follow_redirects=True) as client:
+            resp = await client.get("https://duckduckgo.com/html/", params={"q": query, "kl": "us-en"}, headers=headers)
+            if resp.status_code >= 400:
+                logger.warning(f"Search fallback returned HTTP {resp.status_code}")
+                return
+
+            soup = BeautifulSoup(resp.text, "lxml")
+            batch = []
+            seen = set()
+
+            for anchor in soup.select("a.result__a"):
+                href = anchor.get("href")
+                if not href:
+                    continue
+
+                parsed = urlparse(href)
+                if parsed.netloc == "duckduckgo.com" and parsed.path == "/l/":
+                    params = parse_qs(parsed.query)
+                    target = params.get("uddg", [None])[0]
+                    if target:
+                        href = unquote(target)
+                        parsed = urlparse(href)
+
+                domain = parsed.netloc.split(":")[0]
+                if not domain or domain in seen:
+                    continue
+                if not domain.endswith(f".{suffix}"):
+                    continue
+
+                seen.add(domain)
+                batch.append((domain, "SEARCH"))
+
+                if len(batch) >= 50 or len(seen) >= limit:
+                    await insert_domains(batch)
+                    batch = []
+
+                if len(seen) >= limit:
+                    break
+
+            if batch:
+                await insert_domains(batch)
+
+    except Exception as e:
+        logger.error(f"Search fallback error: {e}")
+
 async def run_discovery(tld: str, limit: int = 100):
     """Main discovery task."""
     # 1. Tranco
@@ -135,3 +194,6 @@ async def run_discovery(tld: str, limit: int = 100):
     # Logic: If limit is large, Tranco fills most. CC adds variety.
     # We'll just run both for PoC to demonstrate hybrid nature.
     await ingest_common_crawl_domains(tld, limit // 2) # Fetch 50% limit from CC
+
+    # 3. Search engine fallback (top ~50)
+    await ingest_search_engine_domains(tld, min(50, max(10, limit // 2)))

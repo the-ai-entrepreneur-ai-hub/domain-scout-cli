@@ -13,6 +13,7 @@ common_crawl_limit: 2000
 request_timeout: 15
 max_redirects: 5
 max_retries: 2
+respect_robots: true
 
 # Extractor Settings
 email_regex_strict: true

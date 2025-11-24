@@ -1,14 +1,16 @@
 import asyncio
 import httpx
-import time
 from pathlib import Path
+from random import uniform
+from urllib.robotparser import RobotFileParser
+from typing import Optional, Dict
 from fake_useragent import UserAgent
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
 from .database import get_pending_domains, update_domain_status, DB_PATH
 from .dns_checker import DNSChecker
 from .extractor import Extractor
-from .utils import logger
+from .utils import logger, load_settings
 from .models import CrawlResult
 import aiosqlite
 
@@ -18,6 +20,7 @@ class Crawler:
         self.ua = UserAgent()
         self.dns_checker = DNSChecker()
         self.extractor = Extractor()
+        self.settings = load_settings()
         
         # Load blacklist
         self.blacklist = set()
@@ -25,10 +28,19 @@ class Crawler:
         if blacklist_path.exists():
             with open(blacklist_path, 'r') as f:
                 self.blacklist = {line.strip() for line in f if line.strip()}
+
+        # Politeness and HTTP controls
+        self.delay_min = float(self.settings.get("delay_min", 1))
+        self.delay_max = float(self.settings.get("delay_max", 3))
+        self.request_timeout = float(self.settings.get("request_timeout", 15))
+        self.max_redirects = int(self.settings.get("max_redirects", 5))
+        self.respect_robots = bool(self.settings.get("respect_robots", True))
+        self.robots_cache: Dict[str, RobotFileParser] = {}
     
-    def get_headers(self):
+    def get_headers(self, user_agent: Optional[str] = None):
+        ua_string = user_agent or self.ua.random
         return {
-            "User-Agent": self.ua.random,
+            "User-Agent": ua_string,
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
             "Accept-Language": "en-US,en;q=0.5",
             "DNT": "1",
@@ -36,18 +48,52 @@ class Crawler:
             "Upgrade-Insecure-Requests": "1"
         }
 
+    async def fetch_robots(self, client: httpx.AsyncClient, domain: str, headers: dict) -> RobotFileParser:
+        """
+        Fetch and parse robots.txt for a domain. Cache result to avoid duplicate hits.
+        """
+        if domain in self.robots_cache:
+            return self.robots_cache[domain]
+
+        rp = RobotFileParser()
+        for scheme in ("https", "http"):
+            robots_url = f"{scheme}://{domain}/robots.txt"
+            try:
+                resp = await client.get(robots_url, headers=headers, timeout=self.request_timeout)
+            except Exception:
+                continue
+
+            if resp.status_code in (401, 403):
+                rp.parse(["User-agent: *", "Disallow: /"])
+                break
+
+            if resp.status_code >= 400:
+                rp.parse([])  # Treat missing robots as allow-all
+                break
+
+            rp.parse(resp.text.splitlines())
+            break
+
+        self.robots_cache[domain] = rp
+        return rp
+
+    async def robots_allows(self, client: httpx.AsyncClient, domain: str, headers: dict, path: str = "/") -> bool:
+        if not self.respect_robots:
+            return True
+        try:
+            rp = await self.fetch_robots(client, domain, headers)
+            return rp.can_fetch(headers.get("User-Agent", "*"), path)
+        except Exception as exc:
+            logger.warning(f"Robots check failed for {domain}: {exc}")
+            return False
+
     @retry(stop=stop_after_attempt(2), wait=wait_exponential(multiplier=1, min=2, max=10),
            retry=retry_if_exception_type((httpx.RequestError, httpx.TimeoutException)))
-    async def fetch_page(self, client: httpx.AsyncClient, url: str) -> httpx.Response:
-        return await client.get(url)
+    async def fetch_page(self, client: httpx.AsyncClient, url: str, headers: dict) -> httpx.Response:
+        return await client.get(url, headers=headers, timeout=self.request_timeout)
 
     async def process_domain(self, domain_row):
         domain_id, domain = domain_row['id'], domain_row['domain']
-        
-        # 0. Check Stop File
-        if Path("STOP").exists():
-            logger.warning("STOP file detected. Halting worker.")
-            return False
 
         # 1. Blacklist Check
         if any(b in domain for b in self.blacklist):
@@ -64,19 +110,30 @@ class Crawler:
             return
 
         url = f"https://{domain}"
+        user_agent = self.ua.random
+        headers = self.get_headers(user_agent)
         
         try:
-            async with httpx.AsyncClient(timeout=15, http2=True, follow_redirects=True, verify=False) as client:
+            async with httpx.AsyncClient(timeout=self.request_timeout, http2=True, follow_redirects=True, verify=False, max_redirects=self.max_redirects) as client:
+                # Robots.txt check
+                if not await self.robots_allows(client, domain, headers, "/"):
+                    logger.info(f"Blocked by robots.txt: {domain}")
+                    await update_domain_status(domain_id, "BLOCKED_ROBOTS")
+                    return
+
+                # Politeness delay
+                await asyncio.sleep(uniform(self.delay_min, self.delay_max))
+
                 # 3. Fetch
                 try:
-                    resp = await self.fetch_page(client, url)
+                    resp = await self.fetch_page(client, url, headers)
                 except Exception as e:
                     # Try http if https failed? For PoC, we assume https first.
                     # Actually, follow_redirects might handle it if we started with http, but we force https.
                     # Let's fallback to http if generic error.
                     try:
                         url_http = f"http://{domain}"
-                        resp = await self.fetch_page(client, url_http)
+                        resp = await self.fetch_page(client, url_http, headers)
                     except Exception as e2:
                         await update_domain_status(domain_id, "FAILED_CONNECTION")
                         return
@@ -148,6 +205,10 @@ class Crawler:
         workers = [asyncio.create_task(self.worker(queue)) for _ in range(self.concurrency)]
         
         while True:
+            if Path("STOP").exists():
+                logger.warning("STOP file detected. Halting before fetching new batch.")
+                break
+
             # Fetch batch from DB
             # We only fetch domains that are PENDING.
             # In a real distributed system, we would 'lock' them. 
@@ -155,9 +216,7 @@ class Crawler:
             batch = await get_pending_domains(limit=100)
             
             if not batch:
-                logger.info("No pending domains found. Sleeping...")
-                # Check if we are done-done or just waiting for slow discovery?
-                # For PoC, we just exit if empty.
+                logger.info("No pending domains found. Exiting crawl loop.")
                 break
                 
             for row in batch:
@@ -165,6 +224,10 @@ class Crawler:
             
             # Wait for queue to drain before fetching next batch
             await queue.join()
+
+            if Path("STOP").exists():
+                logger.warning("STOP file detected. Stopping after current batch.")
+                break
             
         # Cancel workers
         for w in workers:
