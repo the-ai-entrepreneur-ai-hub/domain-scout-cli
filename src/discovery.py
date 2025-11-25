@@ -3,6 +3,8 @@ import pandas as pd
 import zipfile
 import io
 import asyncio
+import json
+import re
 from pathlib import Path
 from urllib.parse import urlparse, parse_qs, unquote
 from bs4 import BeautifulSoup
@@ -10,8 +12,12 @@ from .utils import logger
 from .database import insert_domains
 
 TRANCO_URL = "https://tranco-list.eu/top-1m.csv.zip"
+MAJESTIC_URL = "https://downloads.majestic.com/majestic_million.csv"
+UMBRELLA_URL = "http://s3-us-west-1.amazonaws.com/umbrella-static/top-1m.csv.zip"
 DATA_DIR = Path("data")
 TRANCO_FILE = DATA_DIR / "top-1m.csv"
+MAJESTIC_FILE = DATA_DIR / "majestic_million.csv"
+UMBRELLA_FILE = DATA_DIR / "umbrella-top-1m.csv"
 
 def setup_data_dir():
     DATA_DIR.mkdir(exist_ok=True)
@@ -74,6 +80,148 @@ async def ingest_tranco_domains(tld: str, limit: int = 1000):
             
     except Exception as e:
         logger.error(f"Error processing Tranco list: {e}")
+
+def download_majestic_list():
+    """Download Majestic Million CSV (no zip)."""
+    if MAJESTIC_FILE.exists():
+        logger.info("Majestic Million list already exists.")
+        return
+
+    logger.info("Downloading Majestic Million list...")
+    try:
+        with httpx.Client(timeout=120, follow_redirects=True) as client:
+            response = client.get(MAJESTIC_URL)
+            response.raise_for_status()
+            MAJESTIC_FILE.write_bytes(response.content)
+        logger.info("Majestic Million list downloaded.")
+    except Exception as e:
+        logger.error(f"Failed to download Majestic Million: {e}")
+
+
+def download_umbrella_list():
+    """Download Cisco Umbrella top 1M (zipped)."""
+    if UMBRELLA_FILE.exists():
+        logger.info("Umbrella list already exists.")
+        return
+
+    logger.info("Downloading Cisco Umbrella list...")
+    try:
+        with httpx.Client(timeout=120, follow_redirects=True) as client:
+            response = client.get(UMBRELLA_URL)
+            response.raise_for_status()
+            with zipfile.ZipFile(io.BytesIO(response.content)) as z:
+                for name in z.namelist():
+                    if name.endswith('.csv'):
+                        with z.open(name) as src:
+                            UMBRELLA_FILE.write_bytes(src.read())
+                        break
+        logger.info("Umbrella list downloaded.")
+    except Exception as e:
+        logger.error(f"Failed to download Umbrella list: {e}")
+
+
+async def ingest_majestic_domains(tld: str, limit: int = 1000):
+    """Reads Majestic Million and pushes matching TLDs to DB."""
+    setup_data_dir()
+    try:
+        download_majestic_list()
+    except:
+        logger.warning("Skipping Majestic source (download failed)")
+        return
+
+    if not MAJESTIC_FILE.exists():
+        return
+
+    logger.info(f"Ingesting Majestic domains for TLD: {tld or 'ANY'}")
+
+    batch = []
+    count = 0
+    chunk_size = 100000
+
+    use_filter = tld not in (None, "", "*", "all", "any")
+    suffix = None
+    if use_filter:
+        suffix = tld if tld.startswith('.') else f".{tld}"
+
+    try:
+        for chunk in pd.read_csv(MAJESTIC_FILE, chunksize=chunk_size):
+            col = 'Domain' if 'Domain' in chunk.columns else chunk.columns[-1]
+            if use_filter:
+                domain_iter = chunk[chunk[col].astype(str).str.endswith(suffix, na=False)][col]
+            else:
+                domain_iter = chunk[col]
+
+            for domain in domain_iter:
+                domain = str(domain).strip().lower()
+                if domain:
+                    batch.append((domain, "MAJESTIC"))
+                    count += 1
+
+                    if len(batch) >= 1000:
+                        await insert_domains(batch)
+                        batch = []
+
+            if count >= limit:
+                break
+
+        if batch:
+            await insert_domains(batch)
+        logger.info(f"Majestic: ingested {count} domains")
+
+    except Exception as e:
+        logger.error(f"Error processing Majestic list: {e}")
+
+
+async def ingest_umbrella_domains(tld: str, limit: int = 1000):
+    """Reads Cisco Umbrella list and pushes matching TLDs to DB."""
+    setup_data_dir()
+    try:
+        download_umbrella_list()
+    except:
+        logger.warning("Skipping Umbrella source (download failed)")
+        return
+
+    if not UMBRELLA_FILE.exists():
+        return
+
+    logger.info(f"Ingesting Umbrella domains for TLD: {tld or 'ANY'}")
+
+    batch = []
+    count = 0
+    chunk_size = 100000
+
+    use_filter = tld not in (None, "", "*", "all", "any")
+    suffix = None
+    if use_filter:
+        suffix = tld if tld.startswith('.') else f".{tld}"
+
+    try:
+        for chunk in pd.read_csv(UMBRELLA_FILE, header=None, names=['rank', 'domain'], chunksize=chunk_size):
+            if use_filter:
+                domain_iter = chunk[chunk['domain'].astype(str).str.endswith(suffix, na=False)]['domain']
+            else:
+                domain_iter = chunk['domain']
+
+            for domain in domain_iter:
+                domain = str(domain).strip().lower()
+                if domain:
+                    batch.append((domain, "UMBRELLA"))
+                    count += 1
+
+                    if len(batch) >= 1000:
+                        await insert_domains(batch)
+                        batch = []
+
+            if count >= limit:
+                break
+
+        if batch:
+            await insert_domains(batch)
+        logger.info(f"Umbrella: ingested {count} domains")
+
+    except Exception as e:
+        logger.error(f"Error processing Umbrella list: {e}")
+
 
 async def ingest_common_crawl_domains(tld: str, limit: int = 100):
     """Queries Common Crawl and pushes to DB."""
@@ -198,13 +346,209 @@ async def ingest_search_engine_domains(tld: str, limit: int = 50):
     except Exception as e:
         logger.error(f"Search fallback error: {e}")
 
-async def run_discovery(tld: str, limit: int = 100):
-    """Main discovery task."""
-    # 1. Tranco (always)
-    await ingest_tranco_domains(tld, limit)
-    
-    # 2. Common Crawl (skip for ANY to avoid unbounded results)
-    await ingest_common_crawl_domains(tld, limit // 2) # Fetch 50% limit from CC
+async def ingest_crtsh_domains(tld: str, limit: int = 100):
+    """Query Certificate Transparency logs via crt.sh for domains."""
+    if tld in (None, "", "*", "all", "any"):
+        logger.info("Skipping crt.sh for ANY-TLD mode.")
+        return
 
-    # 3. Search engine fallback (top ~50)
-    await ingest_search_engine_domains(tld, min(50, max(10, limit // 2)))
+    suffix = tld.lstrip(".")
+    logger.info(f"Querying crt.sh for TLD: {suffix}")
+
+    try:
+        async with httpx.AsyncClient(timeout=60, follow_redirects=True) as client:
+            resp = await client.get(
+                "https://crt.sh/",
+                params={"q": f"%.{suffix}", "output": "json"},
+                headers={"User-Agent": "Mozilla/5.0"}
+            )
+            if resp.status_code != 200:
+                logger.warning(f"crt.sh returned HTTP {resp.status_code}")
+                return
+
+            try:
+                certs = resp.json()
+            except:
+                logger.warning("crt.sh returned non-JSON response")
+                return
+
+            batch = []
+            seen = set()
+
+            for cert in certs:
+                name = cert.get("common_name") or cert.get("name_value", "")
+                for part in name.replace("\n", " ").split():
+                    part = part.strip().lower().lstrip("*.")
+                    if not part or part in seen:
+                        continue
+                    if not part.endswith(f".{suffix}"):
+                        continue
+                    seen.add(part)
+                    batch.append((part, "CRTSH"))
+
+                    if len(batch) >= 500:
+                        await insert_domains(batch)
+                        batch = []
+
+                    if len(seen) >= limit:
+                        break
+                if len(seen) >= limit:
+                    break
+
+            if batch:
+                await insert_domains(batch)
+            logger.info(f"crt.sh: ingested {len(seen)} domains")
+
+    except Exception as e:
+        logger.error(f"crt.sh error: {e}")
+
+
+async def ingest_wayback_domains(tld: str, limit: int = 100):
+    """Query Wayback Machine CDX for historical domains."""
+    if tld in (None, "", "*", "all", "any"):
+        logger.info("Skipping Wayback for ANY-TLD mode.")
+        return
+
+    suffix = tld.lstrip(".")
+    logger.info(f"Querying Wayback Machine for TLD: {suffix}")
+
+    try:
+        async with httpx.AsyncClient(timeout=60, follow_redirects=True) as client:
+            resp = await client.get(
+                "https://web.archive.org/cdx/search/cdx",
+                params={
+                    "url": f"*.{suffix}",
+                    "matchType": "domain",
+                    "output": "json",
+                    "fl": "original",
+                    "collapse": "urlkey",
+                    "limit": limit * 5,
+                    "filter": "statuscode:200"
+                }
+            )
+            if resp.status_code != 200:
+                logger.warning(f"Wayback returned HTTP {resp.status_code}")
+                return
+
+            try:
+                rows = resp.json()
+            except:
+                logger.warning("Wayback returned non-JSON response")
+                return
+
+            batch = []
+            seen = set()
+
+            for row in rows[1:]:  # Skip header row
+                if not row:
+                    continue
+                url = row[0] if isinstance(row, list) else row
+                parsed = urlparse(url if url.startswith("http") else f"http://{url}")
+                domain = parsed.netloc.split(":")[0].lower()
+                if not domain or domain in seen:
+                    continue
+                if not domain.endswith(f".{suffix}"):
+                    continue
+
+                seen.add(domain)
+                batch.append((domain, "WAYBACK"))
+
+                if len(batch) >= 500:
+                    await insert_domains(batch)
+                    batch = []
+
+                if len(seen) >= limit:
+                    break
+
+            if batch:
+                await insert_domains(batch)
+            logger.info(f"Wayback: ingested {len(seen)} domains")
+
+    except Exception as e:
+        logger.error(f"Wayback error: {e}")
+
+
+async def ingest_bing_search(tld: str, limit: int = 50):
+    """Bing search fallback for domain discovery."""
+    suffix = None
+    if tld not in (None, "", "*", "all", "any"):
+        suffix = tld.lstrip(".")
+        query = f"site:{suffix} contact OR about"
+    else:
+        query = "company contact page"
+    
+    logger.info(f"Bing search fallback for {tld or 'ANY'} (limit={limit})")
+
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.5"
+    }
+
+    try:
+        async with httpx.AsyncClient(timeout=20, follow_redirects=True) as client:
+            resp = await client.get(
+                "https://www.bing.com/search",
+                params={"q": query, "count": min(50, limit)},
+                headers=headers
+            )
+            if resp.status_code >= 400:
+                logger.warning(f"Bing returned HTTP {resp.status_code}")
+                return
+
+            soup = BeautifulSoup(resp.text, "lxml")
+            batch = []
+            seen = set()
+
+            for anchor in soup.select("li.b_algo h2 a, .b_algo a"):
+                href = anchor.get("href")
+                if not href or not href.startswith("http"):
+                    continue
+
+                parsed = urlparse(href)
+                domain = parsed.netloc.split(":")[0].lower()
+                if not domain or domain in seen:
+                    continue
+                if "bing.com" in domain or "microsoft.com" in domain:
+                    continue
+                if suffix and not domain.endswith(f".{suffix}"):
+                    continue
+
+                seen.add(domain)
+                batch.append((domain, "BING"))
+
+                if len(batch) >= 50:
+                    await insert_domains(batch)
+                    batch = []
+
+                if len(seen) >= limit:
+                    break
+
+            if batch:
+                await insert_domains(batch)
+            logger.info(f"Bing: ingested {len(seen)} domains")
+
+    except Exception as e:
+        logger.error(f"Bing search error: {e}")
+
+
+async def run_discovery(tld: str, limit: int = 100):
+    """Main discovery task - aggregates domains from multiple sources."""
+    logger.info(f"=== Starting discovery for TLD: {tld or 'ANY'}, limit: {limit} ===")
+
+    # Primary sources (bulk domain lists)
+    await ingest_tranco_domains(tld, limit)
+    await ingest_majestic_domains(tld, limit)
+    await ingest_umbrella_domains(tld, limit)
+
+    # Secondary sources (APIs)
+    await ingest_common_crawl_domains(tld, limit // 2)
+    await ingest_crtsh_domains(tld, limit // 2)
+    await ingest_wayback_domains(tld, limit // 2)
+
+    # Tertiary sources (search engines)
+    search_limit = min(50, max(10, limit // 2))
+    await ingest_search_engine_domains(tld, search_limit)
+    await ingest_bing_search(tld, search_limit)
+
+    logger.info("=== Discovery complete ===")
