@@ -1,10 +1,10 @@
-# Product Requirement Document (PRD): TLD-Based Web Crawler PoC (v1.2 - Final)
+# Product Requirement Document (PRD): TLD-Based Web Crawler PoC (v4.0 - Robust Legal Extraction)
 
 ## 1. Executive Summary
-**Project Name:** Simple Web Crawler for Public Website Data (PoC)
-**Objective:** Develop a Python-based Proof-of-Concept (PoC) script that discovers, crawls, and extracts public company information from websites associated with a specific Top-Level Domain (TLD) (e.g., `.de`, `.ch`).
-**Target Users:** Technical users running the script via Command Line Interface (CLI).
-**Scope:** This is a prototype to demonstrate automated discovery and extraction. It is **not** a large-scale distributed production system.
+**Project Name:** Intelligent Web Crawler with Legal & Company Disclosure Extraction
+**Objective:** Develop a Python-based Proof-of-Concept (PoC) that accurately discovers, crawls, and extracts comprehensive business information including legal disclosures, company registration details, and compliance information from websites using modern web technologies, structured data parsing, and machine learning techniques.
+**Target Users:** Technical users requiring comprehensive business intelligence and legal compliance data via Command Line Interface (CLI).
+**Scope:** This is an advanced prototype demonstrating intelligent extraction of both general business data and specific legal/regulatory information. It handles JavaScript-rendered content, multi-language legal notices, and provides validated company registration details.
 
 ## 2. Project Scope & Deliverables
 
@@ -45,16 +45,87 @@ The system must identify target domains and persist them before crawling.
     *   **Blacklist:** Skip domains in `config/blacklist.txt` (e.g., `facebook.com`, `amazon.com`).
 *   **Runtime Control:** Stop gracefully if a file named `STOP` is detected in the root directory.
 
-### 3.3 Data Extraction & Quality
-*   **Parked Domain Detection:** Skip if Title/Content contains keywords: "Domain for sale", "Under Construction", "Parking", "GoDaddy".
-*   **Fields:**
-    1.  **Domain URL**
-    2.  **Company Name:** (`og:site_name` > `meta title`).
-    3.  **Description:** (`meta description`).
-    4.  **Email:** Regex (filtering generic free providers unless on Contact page).
-    5.  **Phone:** Regex.
-    6.  **Address:** Heuristic patterns.
-    7.  **Timestamp.**
+### 3.3 Legal & Company Disclosure Extraction (NEW)
+*   **Legal Notice Detection:** Automatically identify and prioritize legal pages:
+    - /impressum (German), /legal-notice, /legal, /imprint
+    - /mentions-legales (French), /aviso-legal (Spanish)
+    - /note-legali (Italian), /privacy, /datenschutz
+*   **Multi-Language Support:** Extract legal information in 6+ languages
+*   **Registration Information:**
+    - Company registration numbers (HRB, HRA, Companies House, etc.)
+    - Register court/location details
+    - VAT/Tax identification numbers
+    - Data protection registration IDs
+*   **Authorized Representatives:**
+    - CEO/Managing Directors
+    - Board members
+    - Legal representatives
+*   **Complete Address Extraction:**
+    - Registered office address
+    - Postal/correspondence address
+    - International address format support
+
+### 3.5 Robust Legal Data Extraction Requirements (MANDATORY)
+For every discovered website, the system MUST extract all publicly available legal and company disclosure details from the website's legal notice section, regardless of country:
+
+| # | Field | Description | Priority |
+|---|-------|-------------|----------|
+| 1 | **Company/Person Name** | Official legal name or responsible person | Required |
+| 2 | **Legal Form** | GmbH, AG, LLC, Ltd, SARL, etc. | Required |
+| 3 | **Full Postal Address** | Street, ZIP, City, Country (structured fields) | Required |
+| 4 | **Authorized Representatives** | CEO, Directors, Managing Partners | Required |
+| 5 | **Contact Information** | Email and Phone (validated & formatted) | Required |
+| 6 | **Register Details** | Register Type, Court, Registration Number | Required |
+
+*   **Multi-Pass Extraction Strategy:**
+    1. **Pass 1:** Extract from structured data (JSON-LD, Schema.org) - highest accuracy
+    2. **Pass 2:** Section-based extraction from isolated legal content
+    3. **Pass 3:** Pattern matching with field validation
+*   **Section Isolation:** Remove navigation, menus, headers, footers before extraction
+*   **Country-Specific Extractors:** Specialized patterns for DE, UK, FR, IT, ES
+*   **Field Validation:** All extracted data must pass validation before storage
+*   **Structured Address Output:** Separate fields for street, ZIP, city, country
+
+### 3.4 Data Extraction & Quality (Enhanced)
+*   **Parked Domain Detection:** Advanced ML-based classification for parking pages, including visual similarity detection.
+*   **Multi-Page Crawling:** Automatically discover and crawl critical pages (/about, /contact, /impressum, /team).
+*   **Structured Data Parsing:** 
+    - JSON-LD extraction for Schema.org data
+    - Microdata and RDFa parsing
+    - OpenGraph and Twitter Card metadata
+*   **Enhanced Fields:**
+    1.  **Domain URL** 
+    2.  **Company Name:** 
+        - Schema.org Organization/Corporation
+        - JSON-LD @type:LocalBusiness
+        - Copyright patterns (© 2024 Company)
+        - VAT/Tax ID extraction
+    3.  **Description:** Multi-source aggregation from structured data
+    4.  **Email:** 
+        - Validated with MX records
+        - Extracted from mailto: links
+        - Structured data ContactPoint
+    5.  **Phone:** 
+        - International format validation (phonenumbers lib)
+        - Click-to-call links (tel:)
+        - WhatsApp business numbers
+    6.  **Address:** 
+        - Schema.org PostalAddress
+        - Google Maps iframe parsing
+        - Geocoding validation with geopy
+    7.  **Industry:** NAICS/SIC classification
+    8.  **Social Media:** LinkedIn, Twitter, Facebook profiles
+    9.  **Business Hours:** From structured data
+    10. **Confidence Score:** Data quality metric (0-100%)
+    11. **Legal Entity Information:**
+        - Legal name & form (GmbH, LLC, Ltd., etc.)
+        - Registration number & court
+        - Authorized representatives
+    12. **Compliance Data:**
+        - Data protection officer contact
+        - Legal department contact
+        - Fax number (still legally relevant)
+    13. **Timestamp**
 
 ### 3.4 Data Storage
 *   **Database:** SQLite (`crawler_data.db`).
@@ -64,12 +135,26 @@ The system must identify target domains and persist them before crawling.
 
 ## 4. Technical Architecture
 
-### 4.1 Tech Stack
+### 4.1 Tech Stack (Enhanced)
 *   **Language:** Python 3.9+
-*   **HTTP:** `httpx` (Async/HTTP2)
-*   **DNS:** `aiodns`
-*   **Parsing:** `BeautifulSoup4` + `lxml`
-*   **Validation:** `Pydantic`
+*   **Browser Automation:** `playwright` (JavaScript rendering, modern web support)
+*   **HTTP:** `httpx` (Async/HTTP2) + `cloudscraper` (Anti-bot bypass)
+*   **DNS:** `aiodns` + `dnspython` (MX record validation)
+*   **Parsing:** 
+    - `BeautifulSoup4` + `lxml` (HTML parsing)
+    - `extruct` (Structured data extraction)
+    - `trafilatura` (Main content extraction)
+*   **Data Extraction:**
+    - `spacy` (Named Entity Recognition)
+    - `newspaper3k` (Article extraction)
+*   **Validation:** 
+    - `Pydantic` (Data models)
+    - `phonenumbers` (Phone validation)
+    - `email-validator` (Email verification)
+    - `geopy` (Address geocoding)
+*   **ML/NLP:**
+    - `scikit-learn` (Classification)
+    - `langdetect` (Language detection)
 *   **DB:** `sqlite3` + `aiosqlite` (Async DB access)
 
 ### 4.2 Directory Structure

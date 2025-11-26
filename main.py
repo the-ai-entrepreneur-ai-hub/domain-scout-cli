@@ -21,14 +21,25 @@ async def async_main():
     # Crawl Command
     crawl_parser = subparsers.add_parser('crawl', help='Crawl domains from DB')
     crawl_parser.add_argument("--concurrency", type=int, default=10, help="Worker count")
+    crawl_parser.add_argument("--enhanced", action="store_true", help="Use enhanced crawler with JS rendering")
+    crawl_parser.add_argument("--playwright", action="store_true", help="Use Playwright for JavaScript rendering")
 
     # Export Command
     export_parser = subparsers.add_parser('export', help='Export results to CSV')
-    export_parser.add_argument("--output", help="Output CSV file path")
+    export_parser.add_argument("--output", help="Output file path (timestamp auto-added)")
     export_parser.add_argument("--tld", help="Filter by TLD")
+    export_parser.add_argument("--enhanced", action="store_true", help="Export enhanced results")
+    export_parser.add_argument("--json", action="store_true", help="Export as JSON instead of CSV")
+    export_parser.add_argument("--legal-only", action="store_true", help="Export only legal entity information")
+    export_parser.add_argument("--run-id", help="Export data for a specific Run ID (defaults to latest run)")
+    export_parser.add_argument("--include-incomplete", action="store_true", 
+                               help="Include entries without full metadata (default: only export complete records)")
     
     # Reset Command
     subparsers.add_parser('reset', help='Reset FAILED domains to PENDING')
+    
+    # Stats Command
+    subparsers.add_parser('stats', help='Show crawling statistics')
 
     args = parser.parse_args()
     
@@ -55,17 +66,40 @@ async def async_main():
                     logger.info(f"{row['domain']} (source={row['source']})")
         
     elif args.task == 'crawl':
-        from src.crawler import Crawler
-        crawler = Crawler(concurrency=args.concurrency)
-        await crawler.run()
+        if args.enhanced:
+            from src.enhanced_crawler import EnhancedCrawler
+            crawler = EnhancedCrawler(
+                concurrency=args.concurrency,
+                use_playwright=args.playwright
+            )
+            await crawler.run()
+        else:
+            from src.crawler import Crawler
+            crawler = Crawler(concurrency=args.concurrency)
+            await crawler.run()
         
     elif args.task == 'export':
-        from src.storage import export_to_csv
-        await export_to_csv(args.output, args.tld)
+        if getattr(args, 'legal_only', False):
+            from src.enhanced_storage import export_legal_entities_to_csv
+            full_metadata_only = not getattr(args, 'include_incomplete', False)
+            await export_legal_entities_to_csv(args.output, args.tld, args.run_id, full_metadata_only)
+        elif args.enhanced:
+            from src.enhanced_storage import export_enhanced_to_csv, export_enhanced_to_json
+            if args.json:
+                await export_enhanced_to_json(args.output, args.tld, args.run_id)
+            else:
+                await export_enhanced_to_csv(args.output, args.tld, True, args.run_id)
+        else:
+            from src.storage import export_to_csv
+            await export_to_csv(args.output, args.tld)
         
     elif args.task == 'reset':
         from src.reset_tool import reset_failed_domains
         await reset_failed_domains()
+        
+    elif args.task == 'stats':
+        from src.enhanced_storage import print_statistics
+        await print_statistics()
 
 def main():
     try:

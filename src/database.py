@@ -23,7 +23,7 @@ async def init_db():
             )
         """)
         
-        # Results Table
+        # Results Table (Original)
         await db.execute("""
             CREATE TABLE IF NOT EXISTS results (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -36,6 +36,107 @@ async def init_db():
                 crawled_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
+        
+        # Enhanced Results Table
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS results_enhanced (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                domain TEXT UNIQUE NOT NULL,
+                company_name TEXT,
+                description TEXT,
+                emails TEXT,
+                phones TEXT,
+                address TEXT,
+                industry TEXT,
+                vat_id TEXT,
+                social_linkedin TEXT,
+                social_facebook TEXT,
+                social_twitter TEXT,
+                social_instagram TEXT,
+                social_youtube TEXT,
+                language TEXT,
+                confidence_score REAL,
+                business_hours TEXT,
+                website_type TEXT,
+                crawled_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                run_id TEXT
+            )
+        """)
+        
+        # Legal Entities Table (v4.0 - Robust Extraction)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS legal_entities (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                domain TEXT UNIQUE NOT NULL,
+                legal_name TEXT,
+                legal_form TEXT,
+                trading_name TEXT,
+                
+                -- Registration
+                register_type TEXT,
+                register_court TEXT,
+                registration_number TEXT,
+                vat_id TEXT,
+                tax_id TEXT,
+                siret TEXT,
+                siren TEXT,
+                data_protection_id TEXT,
+                
+                -- Representatives
+                ceo_name TEXT,
+                directors TEXT,  -- JSON array or comma-separated
+                authorized_reps TEXT,  -- JSON array
+                
+                -- Structured Address (new in v4.0)
+                street_address TEXT,
+                postal_code TEXT,
+                city TEXT,
+                state TEXT,
+                country TEXT,
+                
+                -- Legacy Address fields (for backwards compatibility)
+                registered_street TEXT,
+                registered_zip TEXT,
+                registered_city TEXT,
+                registered_state TEXT,
+                registered_country TEXT,
+                
+                -- Postal Address
+                postal_street TEXT,
+                postal_zip TEXT,
+                postal_city TEXT,
+                postal_state TEXT,
+                postal_country TEXT,
+                
+                -- Contact Information
+                phone TEXT,
+                email TEXT,
+                fax TEXT,
+                legal_email TEXT,
+                legal_phone TEXT,
+                fax_number TEXT,
+                dpo_name TEXT,
+                dpo_email TEXT,
+                
+                -- Metadata
+                legal_notice_url TEXT,
+                extraction_confidence REAL,
+                extraction_date TEXT,
+                last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                run_id TEXT
+            )
+        """)
+        
+        # Add run_id column to existing tables if missing
+        try:
+            await db.execute("ALTER TABLE results_enhanced ADD COLUMN run_id TEXT")
+        except Exception:
+            pass
+            
+        try:
+            await db.execute("ALTER TABLE legal_entities ADD COLUMN run_id TEXT")
+        except Exception:
+            pass
         
         # Index for faster queue lookup
         await db.execute("CREATE INDEX IF NOT EXISTS idx_queue_status ON queue(status)")

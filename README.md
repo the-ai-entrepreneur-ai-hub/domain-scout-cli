@@ -1,8 +1,12 @@
-# Simple Web Crawler (PoC)
+# Intelligent Web Crawler with Legal Entity Extraction
 
-**Welcome!** This is a custom-built tool designed to automatically find and extract public business information from websites (like email addresses and company names) for a specific country/domain (e.g., `.de` for Germany).
+**Welcome!** This is a custom-built tool designed to automatically find and extract comprehensive business and legal information from websites for any country/domain (e.g., `.de` for Germany, `.ch` for Switzerland).
 
-It was built to be robust, efficient, and respectful of website rules.
+**Key Features:**
+- Extracts company names, contact info, and full legal disclosures
+- Supports 10+ languages (German, English, French, Italian, Spanish, etc.)
+- Validates phone numbers, emails, and registration data
+- Only exports entries with COMPLETE metadata (strict quality control)
 
 ---
 
@@ -10,38 +14,29 @@ It was built to be robust, efficient, and respectful of website rules.
 
 - [Quick Start Guide](#quick-start-guide)
 - [How It Works](#how-it-works)
+- [Legal Data Extraction](#legal-data-extraction)
 - [Step-by-Step Usage](#step-by-step-usage)
 - [Testing the Crawler](#testing-the-crawler)
 - [Advanced Controls](#advanced-controls)
 - [Output Data](#output-data)
 - [Project Structure](#project-structure)
-- [Documentation](#documentation)
 - [Troubleshooting](#troubleshooting)
 
 ---
 
 ## Quick Start Guide
 
-Follow these simple steps to get the crawler running on your machine.
-
 ### 1. Get the Code
-First, download the latest version of the code using git:
 ```bash
 git clone https://github.com/the-ai-entrepreneur-ai-hub/domain-scout-cli.git
 cd domain-scout-cli
 ```
 
 ### 2. Prerequisites
-Make sure you have **Python 3.9 or higher** installed. If not, download it from [python.org](https://www.python.org/downloads/).
-
-To check your Python version:
-```bash
-python --version
-```
+- **Python 3.9 or higher** - Download from [python.org](https://www.python.org/downloads/)
+- Check version: `python --version`
 
 ### 3. Installation
-Run this command to install the necessary tools:
-
 ```bash
 pip install -r requirements.txt
 ```
@@ -50,23 +45,70 @@ pip install -r requirements.txt
 
 ## How It Works
 
-The crawler operates in **three simple phases**:
+```
++============================================================================+
+|                         WEB CRAWLER PIPELINE                               |
++============================================================================+
+
+  PHASE 1: DISCOVER        PHASE 2: CRAWL           PHASE 3: EXPORT
+  ==================       ===============          ================
+
+  +----------------+       +----------------+       +----------------+
+  |  8 Sources:    |       |  For Each URL: |       |  Quality Filter|
+  |  - Tranco      |       |                |       |                |
+  |  - Majestic    | ====> |  1. DNS Check  | ====> |  Only Complete |
+  |  - Umbrella    |       |  2. Robots.txt |       |  Entries With: |
+  |  - CommonCrawl |       |  3. Fetch HTML |       |                |
+  |  - crt.sh      |       |  4. Extract:   |       |  * Legal Name  |
+  |  - Wayback     |       |     - Company  |       |  * Legal Form  |
+  |  - DuckDuckGo  |       |     - Legal    |       |  * Address     |
+  |  - Bing        |       |     - Contact  |       |  * Contact     |
+  +----------------+       +----------------+       |  * Register    |
+         |                        |                +----------------+
+         v                        v                        |
+  +----------------+       +----------------+              v
+  |   SQLite DB    |       |  Legal Pages:  |       +----------------+
+  |   (queue)      |       |  /impressum    |       | Timestamped    |
+  +----------------+       |  /legal-notice |       | CSV Export     |
+                           |  /imprint      |       +----------------+
+                           +----------------+
+```
+
+---
+
+## Legal Data Extraction
+
+The crawler extracts **6 mandatory fields** from every website's legal notice section:
 
 ```
- DISCOVER          CRAWL            EXPORT
-    |                |                 |
-    v                v                 v
-+--------+      +--------+       +--------+
-| Find   | ---> | Visit  | --->  | Save   |
-| Domains|      | Sites  |       | to CSV |
-+--------+      +--------+       +--------+
++============================================================================+
+|                    MANDATORY LEGAL ENTITY FIELDS                           |
++============================================================================+
+
+  +---------------------------+--------------------------------------------+
+  | FIELD                     | DESCRIPTION                                |
+  +---------------------------+--------------------------------------------+
+  | 1. Company/Person Name    | Official legal name or responsible person |
+  | 2. Legal Form             | GmbH, AG, LLC, Ltd, SARL, S.r.l., etc.    |
+  | 3. Full Postal Address    | Street, ZIP, City, Country (structured)   |
+  | 4. Authorized Reps        | CEO, Directors, Managing Partners         |
+  | 5. Contact Information    | Email AND Phone (validated format)        |
+  | 6. Register Details       | Type, Court, Registration Number          |
+  +---------------------------+--------------------------------------------+
+
+  SUPPORTED COUNTRIES & PATTERNS:
+  +--------+------------------+---------------------------+
+  | Country| Legal Forms      | Register Types            |
+  +--------+------------------+---------------------------+
+  | DE/AT  | GmbH, AG, KG, UG | HRB/HRA + Amtsgericht     |
+  | CH     | AG, GmbH, Sarl   | Commercial Register       |
+  | UK     | Ltd, PLC, LLP    | Companies House           |
+  | FR     | SARL, SAS, SA    | RCS + SIRET/SIREN         |
+  | IT     | S.r.l., S.p.A.   | Registro Imprese          |
+  | ES     | S.L., S.A.       | Registro Mercantil        |
+  | US     | Inc, LLC, Corp   | State + EIN               |
+  +--------+------------------+---------------------------+
 ```
-
-1. **Discovery**: Searches 8 different sources to find website addresses
-2. **Crawling**: Visits each website and extracts business information
-3. **Export**: Saves everything to a CSV file you can open in Excel
-
-> **Want to learn more?** Check out the detailed [Data Model Documentation](docs/DATA_MODEL.md) with diagrams!
 
 ---
 
@@ -217,65 +259,98 @@ google.com
 
 ## Output Data
 
-Your exported CSV file will contain:
+### Enhanced Results CSV (`--enhanced`)
+```
++==============================================================================+
+|                          ENHANCED RESULTS COLUMNS                            |
++==============================================================================+
+| Column           | Description                    | Example                  |
++------------------+--------------------------------+--------------------------+
+| domain           | Website address                | example.de               |
+| company_name     | Official business name         | Example GmbH             |
+| description      | Company description            | Leading provider of...   |
+| emails           | Contact emails (comma-sep)     | info@example.de          |
+| phones           | Phone numbers (intl format)    | +49 30 123456            |
+| address          | Physical address               | Musterstr. 1, Berlin     |
+| industry         | Business sector                | Technology               |
+| vat_id           | VAT/Tax ID                     | DE123456789              |
+| social_linkedin  | LinkedIn company page          | linkedin.com/company/... |
+| confidence_score | Data quality (0-100%)          | 85.0                     |
++------------------+--------------------------------+--------------------------+
+```
 
-| Column | Description | Example |
-|--------|-------------|---------|
-| domain | Website address | `example.de` |
-| company_name | Official business name | `Example GmbH` |
-| description | What the company does | `Leading provider of...` |
-| email | Public contact email | `info@example.de` |
-| phone | Phone number | `+49 30 123456` |
-| address | Physical address | `Musterstr. 1, Berlin` |
+### Legal Entities CSV (`--legal-only`)
+```
++==============================================================================+
+|                       LEGAL ENTITY EXPORT COLUMNS                            |
++==============================================================================+
+| Column              | Description                 | Example                  |
++---------------------+-----------------------------+--------------------------+
+| domain              | Website                     | example.de               |
+| legal_name          | Official company name       | Example GmbH             |
+| legal_form          | Entity type                 | GmbH                     |
+| street_address      | Street + number             | Musterstrasse 123        |
+| postal_code         | ZIP/Postal code             | 12345                    |
+| city                | City name                   | Berlin                   |
+| country             | Country                     | Germany                  |
+| register_type       | Registration type           | Handelsregister B        |
+| register_court      | Court/Authority             | Amtsgericht Berlin       |
+| registration_number | Company number              | HRB 12345                |
+| vat_id              | VAT identification          | DE123456789              |
+| ceo_name            | Managing director           | Max Mustermann           |
+| directors           | Board members               | Name1; Name2             |
+| phone               | Contact phone               | +49 30 123456            |
+| email               | Contact email               | info@example.de          |
+| extraction_conf     | Confidence score            | 90.0                     |
++---------------------+-----------------------------+--------------------------+
+
+NOTE: By default, only entries with ALL required fields are exported.
+      Use --include-incomplete to export partial data.
+```
 
 ---
 
 ## Project Structure
 
 ```
++==============================================================================+
+|                           PROJECT FILE STRUCTURE                             |
++==============================================================================+
+
 Web Crawler/
-|-- main.py              # Main entry point (start here!)
-|-- requirements.txt     # Python dependencies
-|-- README.md            # This file
 |
-|-- src/                 # Source code
-|   |-- discovery.py     # Finds domains (8 sources)
-|   |-- crawler.py       # Visits websites
-|   |-- extractor.py     # Extracts data from HTML
-|   |-- dns_checker.py   # Checks if domains exist
-|   |-- database.py      # Database operations
-|   |-- storage.py       # CSV export
-|   |-- models.py        # Data structures
-|   |-- utils.py         # Logging and settings
-|   +-- reset_tool.py    # Reset failed domains
+|-- main.py                    # CLI entry point
+|-- requirements.txt           # Python dependencies
+|-- README.md                  # This documentation
 |
-|-- config/              # Configuration files
-|   |-- settings.yaml    # Crawler settings
-|   +-- blacklist.txt    # Domains to skip
+|-- src/                       # Source code
+|   |-- discovery.py           # Domain discovery (8 sources)
+|   |-- crawler.py             # Basic HTTP crawler
+|   |-- enhanced_crawler.py    # Advanced crawler with Crawl4AI
+|   |-- extractor.py           # Basic data extraction
+|   |-- enhanced_extractor.py  # Structured data + validation
+|   |-- legal_extractor.py     # Legal notice parsing (multi-language)
+|   |-- enhanced_storage.py    # CSV/JSON export with filtering
+|   |-- link_discoverer.py     # Smart legal page detection
+|   |-- dns_checker.py         # DNS resolution
+|   |-- database.py            # SQLite operations
+|   |-- storage.py             # Basic CSV export
+|   |-- models.py              # Pydantic data models
+|   |-- utils.py               # Logging and settings
+|   +-- reset_tool.py          # Reset failed domains
 |
-|-- data/                # Output data (created automatically)
-|   |-- crawler_data.db  # SQLite database
-|   +-- results_*.csv    # Exported results
+|-- config/                    # Configuration
+|   |-- settings.yaml          # Crawler settings
+|   +-- blacklist.txt          # Domains to skip
 |
-|-- logs/                # Log files
-|   +-- crawler.log      # Detailed activity log
+|-- data/                      # Output (auto-created)
+|   |-- crawler_data.db        # SQLite database
+|   |-- legal_entities_*.csv   # Legal entity exports
+|   +-- results_*.csv          # Enhanced results
 |
-+-- docs/                # Documentation
-    +-- DATA_MODEL.md    # Detailed architecture guide
++-- logs/
+    +-- crawler.log            # Activity log
 ```
-
----
-
-## Documentation
-
-For a deeper understanding of how the crawler works:
-
-- **[Data Model & Architecture Guide](docs/DATA_MODEL.md)** - Detailed diagrams showing:
-  - How data flows through the system
-  - Database table structures
-  - All 8 discovery sources explained
-  - The crawling process step-by-step
-  - How data extraction works
 
 ---
 
