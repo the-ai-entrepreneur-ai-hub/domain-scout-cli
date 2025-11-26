@@ -73,18 +73,38 @@ class EnhancedCrawler:
             
         base_url = f"https://{domain}"
         try:
-            # 3. Crawl Main Page
+            # 3. Crawl Main Page with timeout
             logger.info(f"Crawling: {base_url}")
-            result = await crawler.arun(url=base_url, bypass_cache=True)
+            try:
+                result = await asyncio.wait_for(
+                    crawler.arun(url=base_url, bypass_cache=True),
+                    timeout=30.0
+                )
+            except asyncio.TimeoutError:
+                logger.warning(f"Timeout on HTTPS for {domain}, trying HTTP...")
+                result = None
             
-            if not result.success:
+            if not result or not result.success:
                 # Try HTTP
                 base_url = f"http://{domain}"
-                result = await crawler.arun(url=base_url, bypass_cache=True)
+                try:
+                    result = await asyncio.wait_for(
+                        crawler.arun(url=base_url, bypass_cache=True),
+                        timeout=30.0
+                    )
+                except asyncio.TimeoutError:
+                    logger.warning(f"Timeout on HTTP for {domain}")
+                    await update_domain_status(domain_id, "FAILED_TIMEOUT")
+                    return
                 
-            if not result.success:
-                logger.warning(f"Failed to fetch {domain}: {result.error_message}")
-                await update_domain_status(domain_id, "FAILED_FETCH")
+            if not result or not result.success:
+                error_msg = result.error_message if result else "No response"
+                # Check for HTTP error codes
+                if "ERR_HTTP_RESPONSE_CODE_FAILURE" in str(error_msg):
+                    await update_domain_status(domain_id, "FAILED_HTTP")
+                else:
+                    logger.warning(f"Failed to fetch {domain}: {error_msg}")
+                    await update_domain_status(domain_id, "FAILED_FETCH")
                 return
 
             html = result.html
@@ -158,9 +178,20 @@ class EnhancedCrawler:
         for page_url in pages_to_crawl:
             await asyncio.sleep(random.uniform(self.delay_min, self.delay_max))
             
-            # Crawl page
-            res = await crawler.arun(url=page_url)
-            if not res.success:
+            # Crawl page with timeout
+            try:
+                res = await asyncio.wait_for(
+                    crawler.arun(url=page_url),
+                    timeout=20.0
+                )
+            except asyncio.TimeoutError:
+                logger.warning(f"Timeout crawling {page_url}")
+                continue
+            except Exception as e:
+                logger.debug(f"Error crawling {page_url}: {e}")
+                continue
+                
+            if not res or not res.success:
                 continue
                 
             html = res.html
@@ -296,13 +327,20 @@ class EnhancedCrawler:
             await db.commit()
 
     async def worker(self, queue):
-        """Worker process."""
+        """Worker process with timeout protection."""
         # Initialize Crawler context per worker (efficient reuse)
         async with AsyncWebCrawler(verbose=False) as crawler:
             while True:
                 domain_row = await queue.get()
                 try:
-                    await self.process_domain(domain_row, crawler)
+                    # Overall timeout per domain: 2 minutes max
+                    await asyncio.wait_for(
+                        self.process_domain(domain_row, crawler),
+                        timeout=120.0
+                    )
+                except asyncio.TimeoutError:
+                    logger.error(f"Domain timeout (2min): {domain_row['domain']}")
+                    await update_domain_status(domain_row['id'], "FAILED_TIMEOUT")
                 except Exception as e:
                     logger.exception(f"Worker Error: {e}")
                 finally:
