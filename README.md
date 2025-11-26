@@ -140,41 +140,48 @@ python main.py discover --tld de --limit 1000
 
 ### Step 2: Extract Data (Crawling)
 
-Now, the bot visits the websites found in Step 1 to find emails and company names.
+Now, the bot visits the websites found in Step 1 to extract legal entity information.
 
 ```bash
-python main.py crawl --concurrency 10
+python main.py crawl --enhanced --concurrency 5
 ```
 
 **What this does:**
 - Checks if each domain exists (DNS check)
 - Respects `robots.txt` rules
-- Visits the homepage
-- Extracts company name, email, phone, address
+- Visits homepage + legal pages (/impressum, /legal-notice, /contact)
+- Extracts ALL 6 required fields (name, form, address, reps, contact, register)
+- Validates phone numbers, emails, and registration data
 - Skips "parked" domains (domain for sale pages)
 
 **Example output:**
 ```
-02:15:00 - INFO - Starting Crawler with 10 workers...
-02:15:02 - INFO - Crawled: example.de | Example GmbH
-02:15:04 - WARNING - DNS Failed: deadsite.de
-02:15:06 - INFO - Crawled: company.de | Company AG
+02:15:00 - INFO - Starting Crawl Run abc123 with 5 workers
+02:15:02 - INFO - Crawling: https://example.de
+02:15:04 - INFO - Found legal page: https://example.de/impressum
+02:15:06 - INFO - Extracted: example.de | Example GmbH | HRB 12345
+02:15:08 - WARNING - DNS Failed: deadsite.de
 ```
 
 ### Step 3: Save Results (Export)
 
-Once finished, save the data to a readable Excel/CSV file.
+Once finished, save the data to a timestamped CSV file.
 
 ```bash
-python main.py export --tld de
+python main.py export --legal-only
 ```
 
 **What this does:**
-- Reads all successful results from the database
-- Filters by your chosen TLD (optional)
-- Creates a timestamped CSV file in the `data/` folder
+- Exports ONLY entries with complete metadata (all 6 required fields)
+- Automatically adds timestamp to filename
+- Creates CSV in the `data/` folder
 
-**Your file will be at:** `data/results_de_20240115_143022.csv`
+**Your file will be at:** `data/legal_entities_20241126_143022_abc123.csv`
+
+**To export ALL entries (including incomplete):**
+```bash
+python main.py export --legal-only --include-incomplete
+```
 
 ---
 
@@ -188,11 +195,14 @@ Want to make sure everything works? Follow this quick test:
 # Step 1: Discover just 20 Swiss (.ch) domains
 python main.py discover --tld ch --limit 20
 
-# Step 2: Crawl them (uses 5 workers for a quick test)
-python main.py crawl --concurrency 5
+# Step 2: Crawl them with enhanced legal extraction
+python main.py crawl --enhanced --concurrency 3
 
-# Step 3: Export the results
-python main.py export --tld ch
+# Step 3: Export legal entities (only complete records)
+python main.py export --legal-only
+
+# Step 4: Check statistics
+python main.py stats
 ```
 
 ### What to Check
@@ -202,24 +212,15 @@ python main.py export --tld ch
    - `=== Discovery complete ===`
 
 2. **After Crawling**: Look for:
-   - `Crawled: domain.ch | Company Name` (successful crawls)
-   - Some `DNS Failed` or `PARKED` messages are normal
+   - `Crawling: https://domain.ch` 
+   - `Found legal page: https://domain.ch/impressum`
+   - `Extracted: domain.ch | Company Name | HRB 12345`
 
 3. **After Export**: 
-   - Check the `data/` folder for a new CSV file
-   - Open it in Excel to see your results
+   - Check `data/` folder for `legal_entities_TIMESTAMP.csv`
+   - Open in Excel - should have columns: legal_name, legal_form, address, etc.
 
-### Verify Database Contents
-
-To see what's in your database:
-
-```bash
-# Show domain counts by source
-python -c "import sqlite3; c=sqlite3.connect('data/crawler_data.db').cursor(); c.execute('SELECT source, COUNT(*) FROM queue GROUP BY source'); print(c.fetchall())"
-
-# Show domain counts by status
-python -c "import sqlite3; c=sqlite3.connect('data/crawler_data.db').cursor(); c.execute('SELECT status, COUNT(*) FROM queue GROUP BY status'); print(c.fetchall())"
-```
+4. **After Stats**: Shows completion rate and field coverage
 
 ---
 
