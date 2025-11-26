@@ -103,8 +103,8 @@ async def async_main():
 
 def main():
     try:
-        if sys.platform == 'win32':
-            asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+        # Note: Do NOT use WindowsSelectorEventLoopPolicy on Windows
+        # Playwright/Crawl4AI requires ProactorEventLoop for subprocess support
         asyncio.run(async_main())
     except KeyboardInterrupt:
         logger.info("Interrupted by user.")
