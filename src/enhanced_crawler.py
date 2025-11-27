@@ -348,13 +348,35 @@ class EnhancedCrawler:
 
     async def run(self):
         logger.info(f"Starting Crawl Run {self.run_id} with {self.concurrency} workers.")
+        logger.info(f"Press Ctrl+C or create STOP file to stop and export results.")
+        
+        # Get total pending count for progress tracking
+        async with aiosqlite.connect(DB_PATH) as db:
+            cursor = await db.execute("SELECT COUNT(*) FROM queue WHERE status = 'PENDING'")
+            total_pending = (await cursor.fetchone())[0]
+        
+        self.stats = {
+            'total': total_pending,
+            'completed': 0,
+            'failed': 0,
+            'start_time': asyncio.get_event_loop().time()
+        }
+        
+        logger.info(f"")
+        logger.info(f"=" * 60)
+        logger.info(f"  CRAWL PROGRESS: 0/{total_pending} (0.0%)")
+        logger.info(f"=" * 60)
         
         queue = asyncio.Queue()
         workers = [asyncio.create_task(self.worker(queue)) for _ in range(self.concurrency)]
         
+        # Start progress reporter
+        progress_task = asyncio.create_task(self._progress_reporter())
+        
         try:
             while True:
                 if Path("STOP").exists():
+                    logger.info("STOP file detected. Finishing current batch...")
                     break
                 
                 batch = await get_pending_domains(limit=50)
@@ -365,7 +387,68 @@ class EnhancedCrawler:
                     await queue.put(row)
                 
                 await queue.join()
+        except KeyboardInterrupt:
+            logger.info("Ctrl+C pressed. Stopping gracefully...")
         finally:
+            progress_task.cancel()
             for w in workers: w.cancel()
             
-        logger.info("Crawl Finished.")
+            # Final stats
+            elapsed = asyncio.get_event_loop().time() - self.stats['start_time']
+            total_processed = self.stats['completed'] + self.stats['failed']
+            
+            logger.info(f"")
+            logger.info(f"=" * 60)
+            logger.info(f"  CRAWL FINISHED")
+            logger.info(f"=" * 60)
+            logger.info(f"  Run ID:    {self.run_id}")
+            logger.info(f"  Completed: {self.stats['completed']}")
+            logger.info(f"  Failed:    {self.stats['failed']}")
+            logger.info(f"  Time:      {elapsed/60:.1f} minutes")
+            logger.info(f"=" * 60)
+            logger.info(f"")
+            logger.info(f"  To export results, run:")
+            logger.info(f"  python main.py export --legal-only")
+            logger.info(f"")
+
+    async def _progress_reporter(self):
+        """Report progress every 30 seconds."""
+        while True:
+            await asyncio.sleep(30)
+            await self._print_progress()
+    
+    async def _print_progress(self):
+        """Print current progress stats."""
+        async with aiosqlite.connect(DB_PATH) as db:
+            # Get current counts
+            cursor = await db.execute("""
+                SELECT status, COUNT(*) FROM queue 
+                WHERE status IN ('COMPLETED', 'PENDING', 'PROCESSING', 
+                                 'FAILED_DNS', 'FAILED_FETCH', 'FAILED_HTTP', 
+                                 'FAILED_TIMEOUT', 'FAILED_UNKNOWN', 'PARKED', 'BLACKLISTED')
+                GROUP BY status
+            """)
+            counts = dict(await cursor.fetchall())
+        
+        completed = counts.get('COMPLETED', 0)
+        pending = counts.get('PENDING', 0)
+        processing = counts.get('PROCESSING', 0)
+        failed = sum(v for k, v in counts.items() if k.startswith('FAILED_') or k in ('PARKED', 'BLACKLISTED'))
+        
+        total = completed + pending + processing + failed
+        if total == 0:
+            return
+            
+        pct = (completed + failed) / total * 100
+        elapsed = asyncio.get_event_loop().time() - self.stats['start_time']
+        rate = (completed + failed) / elapsed * 60 if elapsed > 0 else 0
+        
+        # Update stats
+        self.stats['completed'] = completed
+        self.stats['failed'] = failed
+        
+        logger.info(f"")
+        logger.info(f"  PROGRESS: {completed + failed}/{total} ({pct:.1f}%) | "
+                   f"OK: {completed} | FAIL: {failed} | "
+                   f"Rate: {rate:.1f}/min | "
+                   f"Pending: {pending}")
