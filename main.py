@@ -31,6 +31,9 @@ async def async_main():
     crawl_parser.add_argument("--limit", type=int, default=0, help="Max domains to crawl (0 = unlimited)")
     crawl_parser.add_argument("--enhanced", action="store_true", help="Use enhanced crawler with JS rendering")
     crawl_parser.add_argument("--playwright", action="store_true", help="Use Playwright for JavaScript rendering")
+    crawl_parser.add_argument("--use-llm", action="store_true", help="Use LLM (Ollama) for intelligent extraction")
+    crawl_parser.add_argument("--llm-provider", default="ollama/deepseek-r1:7b", help="LLM provider string")
+    crawl_parser.add_argument("--llm-api-base", default="http://localhost:11434", help="Ollama API base URL")
 
     # Export Command
     export_parser = subparsers.add_parser('export', help='Export results to CSV')
@@ -79,7 +82,10 @@ async def async_main():
             crawler = EnhancedCrawler(
                 concurrency=args.concurrency,
                 use_playwright=args.playwright,
-                limit=args.limit
+                limit=args.limit,
+                use_llm=getattr(args, 'use_llm', False),
+                llm_provider=getattr(args, 'llm_provider', 'ollama/deepseek-r1:7b'),
+                llm_api_base=getattr(args, 'llm_api_base', 'http://localhost:11434')
             )
             await crawler.run()
         else:

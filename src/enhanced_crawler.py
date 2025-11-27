@@ -24,15 +24,19 @@ from .dns_checker import DNSChecker
 from .enhanced_extractor import EnhancedExtractor
 from .legal_extractor import LegalExtractor
 from .link_discoverer import LinkDiscoverer
+from .llm_extractor import LLMExtractor
 from .utils import logger, load_settings
 
 class EnhancedCrawler:
-    def __init__(self, concurrency: int = 5, use_playwright: bool = True, limit: int = 0):
+    def __init__(self, concurrency: int = 5, use_playwright: bool = True, limit: int = 0,
+                 use_llm: bool = False, llm_provider: str = "ollama/deepseek-r1:7b",
+                 llm_api_base: str = "http://localhost:11434"):
         if not CRAWL4AI_AVAILABLE:
             raise ImportError("Crawl4AI is not installed. Please run: pip install crawl4ai")
 
         self.concurrency = concurrency
         self.limit = limit  # 0 = unlimited
+        self.use_llm = use_llm
         self.run_id = str(uuid.uuid4())  # Unique ID for this crawl session
         logger.info(f"Initialized EnhancedCrawler with Run ID: {self.run_id}")
         if limit > 0:
@@ -43,6 +47,16 @@ class EnhancedCrawler:
         self.legal_extractor = LegalExtractor()
         self.link_discoverer = LinkDiscoverer()
         self.settings = load_settings()
+        
+        # Initialize LLM extractor if enabled
+        self.llm_extractor = None
+        if use_llm:
+            self.llm_extractor = LLMExtractor(provider=llm_provider, api_base=llm_api_base)
+            if self.llm_extractor.is_available():
+                logger.info(f"LLM extraction ENABLED: {llm_provider}")
+            else:
+                logger.warning("LLM extraction requested but not available. Falling back to regex.")
+                self.use_llm = False
         
         # Load blacklist
         self.blacklist = set()
@@ -210,6 +224,19 @@ class EnhancedCrawler:
             
             # Extract legal data (specialized)
             legal_data = self.legal_extractor.extract(html, page_url)
+            
+            # Use LLM for legal pages if enabled and this looks like a legal page
+            if self.use_llm and self.llm_extractor and legal_data.get('status') == 'SUCCESS':
+                is_legal_url = any(kw in page_url.lower() for kw in ['impressum', 'legal', 'imprint'])
+                if is_legal_url:
+                    logger.info(f"Using LLM extraction for: {page_url}")
+                    llm_data = await self.llm_extractor.extract(crawler, page_url)
+                    if llm_data:
+                        # Merge LLM data with regex data (LLM takes priority)
+                        legal_data = self.llm_extractor.merge_with_regex(llm_data, legal_data)
+                        legal_data['extraction_method'] = 'LLM+Regex'
+                        logger.info(f"LLM extraction successful for {page_url}")
+            
             if legal_data.get('status') == 'SUCCESS':
                 # We found specific legal info!
                 merged_data['legal_info'] = legal_data
