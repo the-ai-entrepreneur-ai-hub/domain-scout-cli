@@ -21,6 +21,7 @@ async def async_main():
     # Crawl Command
     crawl_parser = subparsers.add_parser('crawl', help='Crawl domains from DB')
     crawl_parser.add_argument("--concurrency", type=int, default=10, help="Worker count")
+    crawl_parser.add_argument("--limit", type=int, default=0, help="Max domains to crawl (0 = unlimited)")
     crawl_parser.add_argument("--enhanced", action="store_true", help="Use enhanced crawler with JS rendering")
     crawl_parser.add_argument("--playwright", action="store_true", help="Use Playwright for JavaScript rendering")
 
@@ -70,7 +71,8 @@ async def async_main():
             from src.enhanced_crawler import EnhancedCrawler
             crawler = EnhancedCrawler(
                 concurrency=args.concurrency,
-                use_playwright=args.playwright
+                use_playwright=args.playwright,
+                limit=args.limit
             )
             await crawler.run()
         else:

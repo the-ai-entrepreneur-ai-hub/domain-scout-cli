@@ -27,13 +27,16 @@ from .link_discoverer import LinkDiscoverer
 from .utils import logger, load_settings
 
 class EnhancedCrawler:
-    def __init__(self, concurrency: int = 5, use_playwright: bool = True):
+    def __init__(self, concurrency: int = 5, use_playwright: bool = True, limit: int = 0):
         if not CRAWL4AI_AVAILABLE:
             raise ImportError("Crawl4AI is not installed. Please run: pip install crawl4ai")
 
         self.concurrency = concurrency
+        self.limit = limit  # 0 = unlimited
         self.run_id = str(uuid.uuid4())  # Unique ID for this crawl session
         logger.info(f"Initialized EnhancedCrawler with Run ID: {self.run_id}")
+        if limit > 0:
+            logger.info(f"Crawl limit: {limit} domains")
 
         self.dns_checker = DNSChecker()
         self.extractor = EnhancedExtractor()
@@ -355,16 +358,24 @@ class EnhancedCrawler:
             cursor = await db.execute("SELECT COUNT(*) FROM queue WHERE status = 'PENDING'")
             total_pending = (await cursor.fetchone())[0]
         
+        # Apply limit if set
+        target_count = self.limit if self.limit > 0 else total_pending
+        target_count = min(target_count, total_pending)
+        
         self.stats = {
-            'total': total_pending,
+            'total': target_count,
             'completed': 0,
             'failed': 0,
+            'processed': 0,
             'start_time': asyncio.get_event_loop().time()
         }
         
         logger.info(f"")
         logger.info(f"=" * 60)
-        logger.info(f"  CRAWL PROGRESS: 0/{total_pending} (0.0%)")
+        if self.limit > 0:
+            logger.info(f"  CRAWL TARGET: {target_count} domains (limit set)")
+        else:
+            logger.info(f"  CRAWL TARGET: {target_count} domains (all pending)")
         logger.info(f"=" * 60)
         
         queue = asyncio.Queue()
@@ -373,18 +384,29 @@ class EnhancedCrawler:
         # Start progress reporter
         progress_task = asyncio.create_task(self._progress_reporter())
         
+        domains_queued = 0
         try:
             while True:
                 if Path("STOP").exists():
                     logger.info("STOP file detected. Finishing current batch...")
                     break
                 
-                batch = await get_pending_domains(limit=50)
+                # Check if we've reached the limit
+                if self.limit > 0 and domains_queued >= self.limit:
+                    logger.info(f"Reached limit of {self.limit} domains. Finishing...")
+                    break
+                
+                # Calculate how many more to fetch
+                remaining = (self.limit - domains_queued) if self.limit > 0 else 50
+                batch_size = min(50, remaining) if self.limit > 0 else 50
+                
+                batch = await get_pending_domains(limit=batch_size)
                 if not batch:
                     break
                 
                 for row in batch:
                     await queue.put(row)
+                    domains_queued += 1
                 
                 await queue.join()
         except KeyboardInterrupt:
