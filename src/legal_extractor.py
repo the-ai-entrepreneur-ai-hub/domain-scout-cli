@@ -372,8 +372,9 @@ class LegalExtractor:
                 break
         
         # German/EU address pattern: "Straße 123, 12345 Stadt"
+        # Improved Regex: Captures street name more precisely, max 4 words prefix
         de_pattern = re.compile(
-            r'([A-Za-zäöüÄÖÜß\s\.\-]+(?:straße|str\.|weg|platz|allee|ring|gasse|damm)?)\s*(\d+[a-zA-Z]?)?'
+            r'((?:(?:\b[A-Za-zäöüÄÖÜß\.\-]+\s+){0,4}[A-Za-zäöüÄÖÜß\.\-]+(?:straße|str\.|weg|platz|allee|ring|gasse|damm)))\s*(\d+[a-zA-Z]?)?'
             r'[,\s]+(\d{4,5})\s+([A-Za-zäöüÄÖÜß\s\-]+)',
             re.IGNORECASE
         )
@@ -383,7 +384,13 @@ class LegalExtractor:
             street_num = de_match.group(2) or ''
             parsed['street'] = f"{street_name} {street_num}".strip()
             parsed['zip'] = de_match.group(3)
-            parsed['city'] = de_match.group(4).strip()
+            # Clean city name (remove trailing keywords)
+            city = de_match.group(4).strip()
+            # Remove common trailing words that might be captured
+            for noise in ['Tel', 'Fax', 'Mobil', 'Email', 'Mail', 'Web', 'Userservice', 'Kontakt']:
+                if noise.lower() in city.lower():
+                    city = re.split(noise, city, flags=re.IGNORECASE)[0].strip()
+            parsed['city'] = city
             return parsed
         
         # UK address pattern: "123 Street Name, City, POSTCODE"
@@ -610,6 +617,8 @@ class LegalExtractor:
             r"(?:hrb|hra)\s*\d+.*",
             r"erin[.:\s]+",  # Partial word from "Geschäftsführerin:"
             r"er[.:\s]+",    # Partial word from "Geschäftsführer:"
+            r"so\s+erreichen\s+sie\s+uns.*",
+            r"kontakt\s+zu\s+.*",
         ]
         
         cleaned = name
@@ -668,10 +677,15 @@ class LegalExtractor:
         # Try to find company name with legal form
         if legal_form:
             # Look for [Name] [Legal Form]
-            # Exclude generic words before legal form
-            pattern = re.compile(rf'([A-Za-z0-9ÄÖÜäöüß\s&\-\.]+\s+{re.escape(legal_form)})', re.IGNORECASE)
+            # LIMITATION: Only look back 60 chars to avoid capturing entire paragraphs
+            # Exclude newlines to stay on same line(s) if possible, or allow max 1 newline
+            # [^:\n]{1,60} -> Match up to 60 non-colon non-newline chars
+            pattern = re.compile(rf'([A-Za-z0-9ÄÖÜäöüß&\-\.][A-Za-z0-9ÄÖÜäöüß\s&\-\.]{{0,60}}\s+{re.escape(legal_form)})', re.IGNORECASE)
             matches = pattern.findall(text)
             for match in matches:
+                # Filter out matches that have too many newlines
+                if match.count('\n') > 2:
+                    continue
                 cleaned = self.clean_legal_name(match)
                 if cleaned:
                     candidates.append((cleaned, 5))
