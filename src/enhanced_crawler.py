@@ -225,17 +225,17 @@ class EnhancedCrawler:
             # Extract legal data (specialized)
             legal_data = self.legal_extractor.extract(html, page_url)
             
-            # Use LLM for legal pages if enabled and this looks like a legal page
-            if self.use_llm and self.llm_extractor and legal_data.get('status') == 'SUCCESS':
-                is_legal_url = any(kw in page_url.lower() for kw in ['impressum', 'legal', 'imprint'])
-                if is_legal_url:
-                    logger.info(f"Using LLM extraction for: {page_url}")
-                    llm_data = await self.llm_extractor.extract(crawler, page_url)
-                    if llm_data:
-                        # Merge LLM data with regex data (LLM takes priority)
-                        legal_data = self.llm_extractor.merge_with_regex(llm_data, legal_data)
-                        legal_data['extraction_method'] = 'LLM+Regex'
-                        logger.info(f"LLM extraction successful for {page_url}")
+            # Use LLM for legal pages if enabled
+            is_legal_url = any(kw in page_url.lower() for kw in ['impressum', 'legal', 'imprint'])
+            if self.use_llm and self.llm_extractor and is_legal_url:
+                logger.info(f"Using LLM extraction for: {page_url}")
+                llm_data = await self.llm_extractor.extract(crawler, page_url)
+                if llm_data:
+                    # Merge LLM data with regex data (LLM takes priority)
+                    legal_data = self.llm_extractor.merge_with_regex(llm_data, legal_data)
+                    legal_data['extraction_method'] = 'LLM+Regex'
+                    legal_data['status'] = 'SUCCESS'  # Mark as success since LLM found data
+                    logger.info(f"LLM extraction successful for {page_url}")
             
             if legal_data.get('status') == 'SUCCESS':
                 # We found specific legal info!
@@ -364,18 +364,21 @@ class EnhancedCrawler:
 
     async def worker(self, queue):
         """Worker process with timeout protection."""
+        # Longer timeout when LLM is enabled (LLM calls can take 30-90s)
+        domain_timeout = 300.0 if self.use_llm else 120.0
+        timeout_label = "5min" if self.use_llm else "2min"
+        
         # Initialize Crawler context per worker (efficient reuse)
         async with AsyncWebCrawler(verbose=False) as crawler:
             while True:
                 domain_row = await queue.get()
                 try:
-                    # Overall timeout per domain: 2 minutes max
                     await asyncio.wait_for(
                         self.process_domain(domain_row, crawler),
-                        timeout=120.0
+                        timeout=domain_timeout
                     )
                 except asyncio.TimeoutError:
-                    logger.error(f"Domain timeout (2min): {domain_row['domain']}")
+                    logger.error(f"Domain timeout ({timeout_label}): {domain_row['domain']}")
                     await update_domain_status(domain_row['id'], "FAILED_TIMEOUT")
                 except Exception as e:
                     logger.exception(f"Worker Error: {e}")
