@@ -1,7 +1,14 @@
 import argparse
 import sys
 import asyncio
+import io
 from pathlib import Path
+
+# Fix Windows console encoding for Crawl4AI's Rich output
+if sys.platform == 'win32':
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
+    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
+
 from src.discovery import run_discovery
 from src.database import init_db, get_sample_domains
 from src.utils import logger

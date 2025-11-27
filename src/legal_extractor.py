@@ -465,6 +465,10 @@ class LegalExtractor:
         score = 0.0
         max_score = 100.0
         
+        # Ensure text is not None
+        text = text or ""
+        url = url or ""
+        
         # Check URL
         url_lower = url.lower()
         for path in self.legal_paths:
@@ -473,7 +477,7 @@ class LegalExtractor:
                 break
                 
         # Check title
-        title = soup.title.string.lower() if soup.title else ""
+        title = soup.title.string.lower() if soup.title and soup.title.string else ""
         legal_title_keywords = ['impressum', 'legal', 'imprint', 'mentions', 'aviso']
         if any(kw in title for kw in legal_title_keywords):
             score += 20

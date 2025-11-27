@@ -111,6 +111,10 @@ class EnhancedCrawler:
                 return
 
             html = result.html
+            if not html:
+                logger.warning(f"Empty HTML response for {domain}")
+                await update_domain_status(domain_id, "FAILED_FETCH")
+                return
             
             # 4. Extract data
             data = self.extractor.extract(html, domain, base_url)
@@ -198,6 +202,8 @@ class EnhancedCrawler:
                 continue
                 
             html = res.html
+            if not html:
+                continue
             
             # Extract general data
             page_data = self.extractor.extract(html, initial_data['domain'], page_url)

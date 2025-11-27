@@ -535,6 +535,9 @@ class EnhancedExtractor:
 
     def extract_industry(self, text: str, description: str) -> str:
         """Simple industry classification based on keywords."""
+        if not text and not description:
+            return ""
+            
         industries = {
             'Technology': ['software', 'technology', 'it', 'digital', 'cloud', 'saas', 'app', 'platform'],
             'Healthcare': ['health', 'medical', 'clinic', 'hospital', 'pharma', 'doctor', 'patient'],
@@ -548,7 +551,9 @@ class EnhancedExtractor:
             'Legal': ['law', 'legal', 'attorney', 'lawyer', 'litigation', 'court']
         }
         
-        combined_text = f"{text[:2000]} {description}".lower()
+        text_part = (text or "")[:2000]
+        desc_part = description or ""
+        combined_text = f"{text_part} {desc_part}".lower()
         
         scores = {}
         for industry, keywords in industries.items():
