@@ -85,7 +85,7 @@ async def export_enhanced_to_csv(output_path: str = None, tld_filter: str = None
         return
         
     # Write to CSV with JSON field unpacking
-    with open(output_path, 'w', newline='', encoding='utf-8') as f:
+    with open(output_path, 'w', newline='', encoding='utf-8-sig') as f:
         writer = csv.DictWriter(f, fieldnames=columns)
         writer.writeheader()
         
@@ -164,7 +164,7 @@ async def export_enhanced_to_json(output_path: str = None, tld_filter: str = Non
         results.append(row_dict)
         
     # Write to JSON
-    with open(output_path, 'w', encoding='utf-8') as f:
+    with open(output_path, 'w', encoding='utf-8-sig') as f:
         json.dump(results, f, indent=2, ensure_ascii=False)
         
     logger.info(f"Exported {len(results)} enhanced results to {output_path}")
@@ -263,8 +263,8 @@ async def export_legal_entities_to_csv(output_path: str = None, tld_filter: str 
     6) Register details (type, court, number)
     """
     
-    if not run_id:
-        run_id = await get_latest_run_id()
+    # NOTE: Don't default to latest run - export ALL data if no run specified
+    # This allows exporting accumulated data across multiple runs
     
     # Always use timestamp in filename
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -337,8 +337,8 @@ async def export_legal_entities_to_csv(output_path: str = None, tld_filter: str 
         logger.warning(f"No legal entities with full metadata found to export (Run ID: {run_id})")
         return output_path
         
-    # Write to CSV with JSON field unpacking
-    with open(output_path, 'w', newline='', encoding='utf-8') as f:
+    # Write to CSV with JSON field unpacking and UTF-8 BOM for Windows Excel compatibility
+    with open(output_path, 'w', newline='', encoding='utf-8-sig') as f:
         writer = csv.DictWriter(f, fieldnames=columns)
         writer.writeheader()
         
@@ -451,7 +451,7 @@ async def export_robust_legal_to_csv(output_path: str = None, tld_filter: str = 
         return output_path
         
     # Write to CSV with robust schema
-    with open(output_path, 'w', newline='', encoding='utf-8') as f:
+    with open(output_path, 'w', newline='', encoding='utf-8-sig') as f:
         writer = csv.DictWriter(f, fieldnames=ROBUST_LEGAL_CSV_COLUMNS)
         writer.writeheader()
         

@@ -37,9 +37,11 @@ class LegalExtractor:
         # Registration patterns
         self.register_patterns = {
             # German registers - Combined patterns for common formats
-            'HRB': re.compile(r'HRB\s*[:.]?\s*(\d+)', re.IGNORECASE),
-            'HRA': re.compile(r'HRA\s*[:.]?\s*(\d+)', re.IGNORECASE),
-            'Amtsgericht': re.compile(r'Amtsgericht\s+([A-Za-zÄÖÜäöüß\s\-]+?)(?:[,\s]+(?:HRB|HRA)|\s*$)', re.IGNORECASE),
+            # Note: \b ensures we don't capture trailing letters like HRB 123B -> just 123
+            'HRB': re.compile(r'HRB\s*[:.]?\s*(\d+)\b', re.IGNORECASE),
+            'HRA': re.compile(r'HRA\s*[:.]?\s*(\d+)\b', re.IGNORECASE),
+            # Amtsgericht pattern - capture city name only (1-3 words, no GmbH/AG etc)
+            'Amtsgericht': re.compile(r'Amtsgericht\s+([A-Za-zÄÖÜäöüß]+(?:[\s\-][A-Za-zÄÖÜäöüß]+){0,2})(?:[,\s]+(?:HRB|HRA)|[,\s]*$)', re.IGNORECASE),
             'Registergericht': re.compile(r'Registergericht\s*[:.]?\s*([^,\n]+)', re.IGNORECASE),
             # Bug Fix #5: Combined pattern for "Handelsregister: Amtsgericht München, HRB 12345"
             'Handelsregister_Combined': re.compile(
@@ -308,6 +310,33 @@ class LegalExtractor:
                 if match:
                     addresses['registered'] = self.parse_address(match.group(1))
                     break
+        
+        # NEW: Direct German address pattern extraction
+        if not addresses['registered'].get('street'):
+            # Pattern: "Straße/Weg/Platz NUMBER, ZIP CITY" or "Straße NUMBER ZIP CITY"
+            de_addr_patterns = [
+                # Street Number, ZIP City
+                re.compile(
+                    r'([A-Za-zäöüÄÖÜß\.\-]+(?:straße|str\.|weg|platz|allee|ring|gasse|damm|ufer|chaussee))\s*(\d+[a-zA-Z]?)\s*[,\s]+(\d{5})\s+([A-Za-zäöüÄÖÜß\-]+)',
+                    re.IGNORECASE
+                ),
+                # Street NUMBER\nZIP City (multiline)
+                re.compile(
+                    r'([A-Za-zäöüÄÖÜß\.\-]+(?:straße|str\.|weg|platz|allee|ring|gasse|damm|ufer|chaussee))\s+(\d+[a-zA-Z]?)\s+(\d{5})\s+([A-Za-zäöüÄÖÜß\-]+)',
+                    re.IGNORECASE
+                ),
+            ]
+            for pattern in de_addr_patterns:
+                match = pattern.search(text)
+                if match:
+                    addresses['registered'] = {
+                        'street': f"{match.group(1)} {match.group(2)}".strip(),
+                        'zip': match.group(3),
+                        'city': match.group(4).strip(),
+                        'state': '',
+                        'country': 'Germany'
+                    }
+                    break
                     
         return addresses
 
@@ -384,13 +413,20 @@ class LegalExtractor:
             street_num = de_match.group(2) or ''
             parsed['street'] = f"{street_name} {street_num}".strip()
             parsed['zip'] = de_match.group(3)
-            # Clean city name (remove trailing keywords)
+            # Clean city name - extract only the first 1-2 words
             city = de_match.group(4).strip()
-            # Remove common trailing words that might be captured
-            for noise in ['Tel', 'Fax', 'Mobil', 'Email', 'Mail', 'Web', 'Userservice', 'Kontakt']:
-                if noise.lower() in city.lower():
-                    city = re.split(noise, city, flags=re.IGNORECASE)[0].strip()
-            parsed['city'] = city
+            # Split on common noise and take first part
+            noise_patterns = [
+                r'\s+Tel[.:\s]', r'\s+Fax[.:\s]', r'\s+Mobil', r'\s+E-?Mail', r'\s+Web', 
+                r'\s+Userservice', r'\s+Kontakt', r'\s+Telefon', r'\s+Geschäftsführ',
+                r'\s+Registergericht', r'\s+HRB', r'\s+USt', r'\s+Postfach', r'\s+https?:',
+                r'\s+[A-ZÄÖÜ][a-zäöüß]+\s+[A-ZÄÖÜ][a-zäöüß]+\s+GmbH',  # Stop at "Name Name GmbH"
+            ]
+            for noise in noise_patterns:
+                city = re.split(noise, city, flags=re.IGNORECASE)[0].strip()
+            # Also limit to max 3 words
+            city_words = city.split()[:3]
+            parsed['city'] = ' '.join(city_words)
             return parsed
         
         # UK address pattern: "123 Street Name, City, POSTCODE"
@@ -598,8 +634,9 @@ class LegalExtractor:
             
         # Junk prefixes to strip (Case Insensitive)
         junk_prefixes = [
+            r"^.*?(?=\b[A-ZÄÖÜ][a-zäöüß]*(?:\s+[A-ZÄÖÜ][a-zäöüß]*)*\s+(?:GmbH|AG|KG|Ltd|Inc|SE)\b)",  # Strip everything before Company + LegalForm
             r"verantwortlich[.:\s]+(?:für\s+den\s+inhalt)?[.:\s]*", 
-            r"text-\s+und\s+data-mining.*",
+            r"text-\s*und\s+data-mining[^A-Z]*",
             r"impressum\s*(?:angaben\s+gemäß)?\s*[§0-9a-z\s]*[.:]*",
             r"herausgeber[.:\s]*", 
             r"angaben\s+gemäß\s+§\s*\d+\s+tmg",
@@ -610,15 +647,29 @@ class LegalExtractor:
             r"name\s+und\s+anschrift[.:\s]*",
             r"firmensitz\s+und\s+standort[.:\s]*",
             r"information\s+(?:about|über)[.:\s]*",
-            # Additional patterns for common junk
             r"geschäftsführer(?:in)?[.:\s]*",
             r"geschäftsführung[.:\s]*",
             r"(?:amtsgericht|registergericht)\s+[a-zäöüß\s\-]+\s*(?:hrb|hra)\s*\d+.*",
             r"(?:hrb|hra)\s*\d+.*",
-            r"erin[.:\s]+",  # Partial word from "Geschäftsführerin:"
-            r"er[.:\s]+",    # Partial word from "Geschäftsführer:"
+            r"erin[.:\s]+",
+            r"er[.:\s]+",
             r"so\s+erreichen\s+sie\s+uns.*",
             r"kontakt\s+zu\s+.*",
+            # NEW: More junk patterns (applied to full string, not just start)
+            r"adresse\s+",
+            r"anschrift\s+",
+            r"über\s+uns.*",
+            r"^verlag\s+",
+            r"^die\s+",
+            r"^der\s+",
+            r"^d[A-Z]",  # Lowercase 'd' followed by uppercase (encoding issue)
+            r"ein\s+partner.*",
+            r"triff\s+das\s+team.*",
+            r"jobs\s+presse.*",
+            r"siehe\s+nachfolgend.*",
+            r"im\s+einzelnen\s+aufgelistet.*",
+            r"essen\s+&\s+trinken.*",
+            r"fitness\s+&\s+wellness.*",
         ]
         
         cleaned = name
@@ -676,18 +727,17 @@ class LegalExtractor:
 
         # Try to find company name with legal form
         if legal_form:
-            # Look for [Name] [Legal Form]
-            # LIMITATION: Only look back 60 chars to avoid capturing entire paragraphs
-            # Exclude newlines to stay on same line(s) if possible, or allow max 1 newline
-            # [^:\n]{1,60} -> Match up to 60 non-colon non-newline chars
-            pattern = re.compile(rf'([A-Za-z0-9ÄÖÜäöüß&\-\.][A-Za-z0-9ÄÖÜäöüß\s&\-\.]{{0,60}}\s+{re.escape(legal_form)})', re.IGNORECASE)
+            # Look for [Name] [Legal Form] - more restrictive pattern
+            # Company names typically: 1-5 capitalized words + legal form
+            # Examples: "Telekom Deutschland GmbH", "STRATO GmbH", "Otto GmbH"
+            pattern = re.compile(
+                rf'((?:[A-ZÄÖÜ][a-zäöüß]*|[A-ZÄÖÜ0-9]+)(?:[\s&\-\.]+(?:[A-ZÄÖÜ][a-zäöüß]*|[A-ZÄÖÜ0-9]+)){{0,4}}\s+{re.escape(legal_form)})',
+                re.MULTILINE
+            )
             matches = pattern.findall(text)
             for match in matches:
-                # Filter out matches that have too many newlines
-                if match.count('\n') > 2:
-                    continue
                 cleaned = self.clean_legal_name(match)
-                if cleaned:
+                if cleaned and len(cleaned) > 5:
                     candidates.append((cleaned, 5))
 
         if candidates:
