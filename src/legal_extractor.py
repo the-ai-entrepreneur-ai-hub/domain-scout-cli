@@ -10,8 +10,28 @@ from langdetect import detect
 import phonenumbers
 from .utils import logger
 
+# Import GLiNER conditionally to avoid crashing if not installed or model fails
+try:
+    from gliner import GLiNER
+    GLINER_AVAILABLE = True
+except ImportError:
+    GLINER_AVAILABLE = False
+    logger.warning("GLiNER library not found. Falling back to regex-only extraction.")
+
 class LegalExtractor:
     def __init__(self):
+        # Initialize GLiNER model
+        self.model = None
+        if GLINER_AVAILABLE:
+            try:
+                # Use the multi-PII model which is excellent for organization names and addresses
+                logger.info("Loading GLiNER model (urchade/gliner_multi_pii-v1)...")
+                self.model = GLiNER.from_pretrained("urchade/gliner_multi_pii-v1")
+                logger.info("GLiNER model loaded successfully.")
+            except Exception as e:
+                logger.error(f"Failed to load GLiNER model: {e}. Falling back to regex.")
+                self.model = None
+
         # Legal page paths in multiple languages
         self.legal_paths = [
             '/impressum', '/imprint', '/legal-notice', '/legal',
@@ -562,6 +582,59 @@ class LegalExtractor:
         
         return is_legal, confidence
 
+    def _predict_gliner(self, text: str) -> Dict[str, Any]:
+        """
+        Predict entities using GLiNER.
+        Returns a structured dictionary with best candidates.
+        """
+        if not self.model:
+            return {}
+
+        # Truncate text for performance if too long (GLiNER handles this but let's be safe)
+        # 5000 chars is usually enough for impressum content
+        if len(text) > 5000:
+            text = text[:5000]
+
+        # Define labels we want to extract
+        # "organization" -> Legal Name
+        # "person" -> Representatives
+        # "street_address", "city", "zip_code" -> Address
+        # "commercial_register_number", "tax_id" -> Registration
+        # "phone_number", "email_address" -> Contacts
+        labels = [
+            "organization", 
+            "person", 
+            "street_address", 
+            "city", 
+            "zip_code", 
+            "phone_number", 
+            "email_address", 
+            "tax_id", 
+            "commercial_register_number"
+        ]
+
+        try:
+            entities = self.model.predict_entities(text, labels, threshold=0.3)
+            
+            results = {}
+            # Group by label
+            for entity in entities:
+                label = entity["label"]
+                text_val = entity["text"].strip()
+                score = entity["score"]
+                
+                if label not in results:
+                    results[label] = []
+                
+                # Add if not duplicate
+                if not any(e['text'] == text_val for e in results[label]):
+                    results[label].append({"text": text_val, "score": score})
+
+            return results
+        except Exception as e:
+            logger.error(f"GLiNER prediction failed: {e}")
+            return {}
+
     def extract(self, html: str, url: str) -> Dict[str, Any]:
         """Main extraction method for legal information."""
         try:
@@ -589,6 +662,7 @@ class LegalExtractor:
                 'legal_notice_url': url
             }
             
+            # --- 1. REGEX EXTRACTION (Baseline) ---
             # Extract legal form
             legal_form = self.extract_legal_form(text)
             if legal_form:
@@ -613,11 +687,76 @@ class LegalExtractor:
             contacts = self.extract_legal_contacts(soup, text)
             result.update(contacts)
             
-            # Extract company name from legal context
+            # Extract company name from legal context (Regex)
             legal_name = self.extract_legal_name(text, legal_form)
             if legal_name:
                 result['legal_name'] = legal_name
+
+            # --- 2. GLiNER ENHANCEMENT (Override/Enrich) ---
+            if self.model:
+                gliner_results = self._predict_gliner(text)
                 
+                # Merge Legal Name (Highest Priority)
+                if 'organization' in gliner_results:
+                    # Get best score organization
+                    best_org = max(gliner_results['organization'], key=lambda x: x['score'])
+                    # GLiNER is much better at excluding "Adresse: ..." prefixes
+                    # Only override if regex failed or GLiNER is very confident
+                    if not result.get('legal_name') or best_org['score'] > 0.6:
+                        # Apply basic cleaning to GLiNER result just in case
+                        # Disable aggressive stripping for GLiNER results
+                        cleaned_gliner_name = self.clean_legal_name(best_org['text'], aggressive=False)
+                        if cleaned_gliner_name:
+                            result['legal_name'] = cleaned_gliner_name
+                            result['extraction_method'] = 'gliner'
+
+                # Merge Representatives (Persons)
+                if 'person' in gliner_results:
+                    gliner_persons = [p['text'] for p in gliner_results['person'] if p['score'] > 0.5]
+                    current_directors = result.get('directors', []) + ([result['ceo']] if result.get('ceo') else [])
+                    
+                    # If regex found nothing, take GLiNER persons
+                    if not current_directors and gliner_persons:
+                        # Heuristic: First person is often CEO/MD
+                        result['ceo'] = gliner_persons[0]
+                        if len(gliner_persons) > 1:
+                            result['directors'] = gliner_persons[1:]
+                    
+                    # If regex found something, just deduplicate/enrich? 
+                    # Actually, user complained about regex quality. Let's trust GLiNER more if confident.
+                    elif gliner_persons:
+                        # If regex result looks like a title ("Geschäftsführer"), replace it
+                        if result.get('ceo') and any(x in result['ceo'].lower() for x in ['geschäftsführer', 'director', 'manager']):
+                            result['ceo'] = gliner_persons[0]
+
+                # Merge Address (Street, City, ZIP)
+                # Regex address extraction is brittle. GLiNER is better at components.
+                if 'street_address' in gliner_results and 'city' in gliner_results:
+                    best_street = max(gliner_results['street_address'], key=lambda x: x['score'])
+                    best_city = max(gliner_results['city'], key=lambda x: x['score'])
+                    best_zip = max(gliner_results['zip_code'], key=lambda x: x['score']) if 'zip_code' in gliner_results else None
+
+                    # Construct address if we have at least street and city
+                    if best_street['score'] > 0.5 and best_city['score'] > 0.5:
+                        # Update registered address
+                        result['registered_street'] = best_street['text']
+                        result['registered_city'] = best_city['text']
+                        if best_zip:
+                            result['registered_zip'] = best_zip['text']
+                        
+                        # Sanity check country
+                        if not result.get('registered_country'):
+                            result['registered_country'] = 'Germany' # Default assumption for impressum, or keep existing
+
+                # Merge Registration Number (HRB/HRA)
+                if 'commercial_register_number' in gliner_results:
+                    best_reg = max(gliner_results['commercial_register_number'], key=lambda x: x['score'])
+                    if best_reg['score'] > 0.8:
+                        # Check if regex missed it or captured garbage
+                        curr_reg = result.get('registration_number')
+                        if not curr_reg or len(curr_reg) > 20: # Garbage regex result
+                            result['registration_number'] = best_reg['text']
+
             return result
             
         except Exception as e:
@@ -627,14 +766,16 @@ class LegalExtractor:
                 'error': str(e)
             }
 
-    def clean_legal_name(self, name: str) -> Optional[str]:
-        """Clean junk from legal name."""
+    def clean_legal_name(self, name: str, aggressive: bool = True) -> Optional[str]:
+        """
+        Clean junk from legal name.
+        :param aggressive: If True, uses aggressive regex to strip prefixes (good for raw text, bad for GLiNER).
+        """
         if not name:
             return None
             
         # Junk prefixes to strip (Case Insensitive)
         junk_prefixes = [
-            r"^.*?(?=\b[A-ZÄÖÜ][a-zäöüß]*(?:\s+[A-ZÄÖÜ][a-zäöüß]*)*\s+(?:GmbH|AG|KG|Ltd|Inc|SE)\b)",  # Strip everything before Company + LegalForm
             r"verantwortlich[.:\s]+(?:für\s+den\s+inhalt)?[.:\s]*", 
             r"text-\s*und\s+data-mining[^A-Z]*",
             r"impressum\s*(?:angaben\s+gemäß)?\s*[§0-9a-z\s]*[.:]*",
@@ -673,6 +814,14 @@ class LegalExtractor:
         ]
         
         cleaned = name
+        
+        # Aggressive stripping of everything before the "Name GmbH" pattern
+        # Only use this for raw regex extraction, not for GLiNER which is already focused
+        if aggressive:
+             prefix_pattern = r"^.*?(?=\b[A-ZÄÖÜ][a-zäöüß0-9]*(?:\s+[A-ZÄÖÜ][a-zäöüß0-9]*)*\s+(?:GmbH|AG|KG|Ltd|Inc|SE)\b)"
+             # Relaxed pattern to allow CamelCase or numbers (a-z0-9)
+             cleaned = re.sub(prefix_pattern, "", cleaned, flags=re.IGNORECASE)
+
         for pattern in junk_prefixes:
             cleaned = re.sub(pattern, "", cleaned, flags=re.IGNORECASE)
         
@@ -721,7 +870,8 @@ class LegalExtractor:
             match = pattern.search(text)
             if match:
                 raw_name = match.group(1)
-                cleaned = self.clean_legal_name(raw_name)
+                # Use aggressive cleaning for regex
+                cleaned = self.clean_legal_name(raw_name, aggressive=True)
                 if cleaned:
                     candidates.append((cleaned, 10)) # High priority
 
@@ -736,7 +886,8 @@ class LegalExtractor:
             )
             matches = pattern.findall(text)
             for match in matches:
-                cleaned = self.clean_legal_name(match)
+                # Use aggressive cleaning for regex
+                cleaned = self.clean_legal_name(match, aggressive=True)
                 if cleaned and len(cleaned) > 5:
                     candidates.append((cleaned, 5))
 

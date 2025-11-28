@@ -15,9 +15,10 @@ from .models import CrawlResult
 import aiosqlite
 
 class Crawler:
-    def __init__(self, concurrency: int = 10):
+    def __init__(self, concurrency: int = 10, ignore_robots: bool = False):
         self.concurrency = concurrency
         self.ua = UserAgent()
+        self.ignore_robots = ignore_robots
         self.dns_checker = DNSChecker()
         self.extractor = Extractor()
         self.settings = load_settings()
@@ -78,6 +79,8 @@ class Crawler:
         return rp
 
     async def robots_allows(self, client: httpx.AsyncClient, domain: str, headers: dict, path: str = "/") -> bool:
+        if self.ignore_robots:
+            return True
         if not self.respect_robots:
             return True
         try:

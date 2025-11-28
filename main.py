@@ -34,6 +34,7 @@ async def async_main():
     crawl_parser.add_argument("--use-llm", action="store_true", help="Use LLM (Ollama) for intelligent extraction")
     crawl_parser.add_argument("--llm-provider", default="ollama/deepseek-r1:7b", help="LLM provider string")
     crawl_parser.add_argument("--llm-api-base", default="http://localhost:11434", help="Ollama API base URL")
+    crawl_parser.add_argument("--ignore-robots", action="store_true", help="Ignore robots.txt rules (CAUTION: May get banned)")
 
     # Export Command
     export_parser = subparsers.add_parser('export', help='Export results to CSV')
@@ -85,12 +86,16 @@ async def async_main():
                 limit=args.limit,
                 use_llm=getattr(args, 'use_llm', False),
                 llm_provider=getattr(args, 'llm_provider', 'ollama/deepseek-r1:7b'),
-                llm_api_base=getattr(args, 'llm_api_base', 'http://localhost:11434')
+                llm_api_base=getattr(args, 'llm_api_base', 'http://localhost:11434'),
+                ignore_robots=getattr(args, 'ignore_robots', False)
             )
             await crawler.run()
         else:
             from src.crawler import Crawler
-            crawler = Crawler(concurrency=args.concurrency)
+            crawler = Crawler(
+                concurrency=args.concurrency,
+                ignore_robots=getattr(args, 'ignore_robots', False)
+            )
             await crawler.run()
         
     elif args.task == 'export':

@@ -8,18 +8,19 @@ class DNSChecker:
 
     async def check_domain(self, domain: str) -> bool:
         """
-        Checks if a domain resolves to an IP.
+        Checks if a domain (or www.domain) resolves to an IP.
         Returns True if resolves, False if NXDOMAIN/Timeout.
         """
         try:
-            # Query A record
+            # Query A record for root domain
             await self.resolver.query(domain, 'A')
             return True
-        except aiodns.error.DNSError as e:
-            # Error 4 is Domain name not found
-            # Error 1 is Format error
-            # logger.debug(f"DNS Check failed for {domain}: {e.args[0]}")
-            return False
-        except Exception as e:
-            logger.debug(f"DNS unexpected error for {domain}: {e}")
-            return False
+        except (aiodns.error.DNSError, Exception):
+            # Fallback: Try www.domain
+            # Many sites (especially universities/older sites) only have records for www
+            try:
+                await self.resolver.query(f"www.{domain}", 'A')
+                return True
+            except Exception:
+                return False
+

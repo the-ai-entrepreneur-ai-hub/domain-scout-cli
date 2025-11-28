@@ -30,17 +30,20 @@ from .utils import logger, load_settings
 class EnhancedCrawler:
     def __init__(self, concurrency: int = 5, use_playwright: bool = True, limit: int = 0,
                  use_llm: bool = False, llm_provider: str = "ollama/deepseek-r1:7b",
-                 llm_api_base: str = "http://localhost:11434"):
+                 llm_api_base: str = "http://localhost:11434", ignore_robots: bool = False):
         if not CRAWL4AI_AVAILABLE:
             raise ImportError("Crawl4AI is not installed. Please run: pip install crawl4ai")
 
         self.concurrency = concurrency
         self.limit = limit  # 0 = unlimited
         self.use_llm = use_llm
+        self.ignore_robots = ignore_robots
         self.run_id = str(uuid.uuid4())  # Unique ID for this crawl session
         logger.info(f"Initialized EnhancedCrawler with Run ID: {self.run_id}")
         if limit > 0:
             logger.info(f"Crawl limit: {limit} domains")
+        if ignore_robots:
+            logger.warning("Ignoring robots.txt rules! This may lead to bans.")
 
         self.dns_checker = DNSChecker()
         self.extractor = EnhancedExtractor()
@@ -92,6 +95,8 @@ class EnhancedCrawler:
         try:
             # 3. Crawl Main Page with timeout
             logger.info(f"Crawling: {base_url}")
+            result = None
+            
             try:
                 result = await asyncio.wait_for(
                     crawler.arun(url=base_url, bypass_cache=True),
@@ -99,7 +104,6 @@ class EnhancedCrawler:
                 )
             except asyncio.TimeoutError:
                 logger.warning(f"Timeout on HTTPS for {domain}, trying HTTP...")
-                result = None
             
             if not result or not result.success:
                 # Try HTTP
@@ -111,8 +115,18 @@ class EnhancedCrawler:
                     )
                 except asyncio.TimeoutError:
                     logger.warning(f"Timeout on HTTP for {domain}")
-                    await update_domain_status(domain_id, "FAILED_TIMEOUT")
-                    return
+                    
+            if not result or not result.success:
+                # Try WWW subdomain (common fix if root domain fails)
+                base_url = f"https://www.{domain}"
+                logger.info(f"Retrying with www: {base_url}")
+                try:
+                    result = await asyncio.wait_for(
+                        crawler.arun(url=base_url, bypass_cache=True),
+                        timeout=30.0
+                    )
+                except asyncio.TimeoutError:
+                    pass
                 
             if not result or not result.success:
                 error_msg = result.error_message if result else "No response"
