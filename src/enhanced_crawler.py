@@ -413,6 +413,15 @@ class EnhancedCrawler:
             phones_str = ','.join(data.get('phones', []))
             social = data.get('social_profiles', {})
             
+            # Safe Address String Conversion
+            raw_address = data.get('address', '')
+            address_str = ''
+            if isinstance(raw_address, dict):
+                parts = [p for p in [raw_address.get('street'), raw_address.get('zip'), raw_address.get('city'), raw_address.get('country')] if p]
+                address_str = ", ".join(parts)
+            elif isinstance(raw_address, str):
+                address_str = raw_address
+            
             # We use INSERT OR REPLACE. run_id will be updated to current run.
             # This effectively "tags" the domain as being part of this run.
             await db.execute("""
@@ -427,7 +436,7 @@ class EnhancedCrawler:
                 data.get('description', ''),
                 emails_str,
                 phones_str,
-                data.get('address', ''),
+                address_str,
                 data.get('industry', ''),
                 data.get('vat_id', ''),
                 social.get('linkedin', ''),
@@ -565,15 +574,18 @@ class EnhancedCrawler:
                 except asyncio.TimeoutError:
                     logger.error(f"Domain timeout ({timeout_label}): {domain_row['domain']}")
                     
-                    # PARTIAL SUCCESS CHECK: If we gathered any data before timeout, count it as success
-                    # Since we don't have the 'data' object here easily, we rely on the database status.
-                    # If the status is already 'COMPLETED' (from process_domain), we are good.
-                    # But process_domain sets COMPLETED at the very end.
-                    # So here, we assume if it timed out, it failed.
-                    await update_domain_status(domain_row['id'], "FAILED_TIMEOUT")
+                    # Emergency WHOIS Fallback on Timeout
+                    try:
+                        # We rely on process_domain to handle the WHOIS fallback internally now.
+                        # This catch block is just a safety net for the hard worker timeout.
+                        await update_domain_status(domain_row['id'], "FAILED_TIMEOUT")
+                        self.session_stats['failed'] += 1
+                    except Exception:
+                        pass
             
                 except Exception as e:
                     logger.exception(f"Worker Error: {e}")
+                    self.session_stats['failed'] += 1
                 finally:
                     queue.task_done()
 
