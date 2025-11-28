@@ -149,8 +149,8 @@ def main():
         # Note: Do NOT use WindowsSelectorEventLoopPolicy on Windows
         # Playwright/Crawl4AI requires ProactorEventLoop for subprocess support
         
-        # Suppress ProactorBasePipeTransport errors on shutdown
         if sys.platform == 'win32':
+            # Suppress ProactorBasePipeTransport errors on shutdown
             from functools import wraps
             from asyncio.proactor_events import _ProactorBasePipeTransport
             
@@ -159,7 +159,7 @@ def main():
                 def wrapper(self, *args, **kwargs):
                     try:
                         return func(self, *args, **kwargs)
-                    except RuntimeError:
+                    except (RuntimeError, ValueError, OSError):
                         pass
                 return wrapper
                 

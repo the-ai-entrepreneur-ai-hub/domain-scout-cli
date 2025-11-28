@@ -49,6 +49,7 @@ async def export_enhanced_to_csv(output_path: str = None, tld_filter: str = None
                     l.postal_state, l.postal_country,
                     l.legal_email, l.legal_phone, l.fax_number,
                     l.dpo_name, l.dpo_email,
+                    l.registrant_name, l.registrant_address, l.registrant_city, l.registrant_country,
                     l.legal_notice_url, l.extraction_confidence as legal_confidence
                 FROM results_enhanced r
                 LEFT JOIN legal_entities l ON r.domain = l.domain
@@ -313,16 +314,13 @@ async def export_legal_entities_to_csv(output_path: str = None, tld_filter: str 
         if full_metadata_only:
             query += """
                 AND legal_name IS NOT NULL AND legal_name != ''
-                AND legal_form IS NOT NULL AND legal_form != ''
-                AND (street_address != '' OR registered_street != '')
-                AND (postal_code != '' OR registered_zip != '')
-                AND (city != '' OR registered_city != '')
-                AND (country != '' OR registered_country != '')
-                AND (ceo_name != '' OR directors != '' OR directors != '[]' OR authorized_reps != '' OR authorized_reps != '[]')
-                AND (phone != '' OR legal_phone != '' OR email != '' OR legal_email != '')
-                AND register_type IS NOT NULL AND register_type != ''
-                AND register_court IS NOT NULL AND register_court != ''
-                AND registration_number IS NOT NULL AND registration_number != ''
+                AND (
+                    (street_address != '' AND city != '') 
+                    OR (registered_street != '' AND registered_city != '')
+                )
+                AND (
+                    email != '' OR phone != '' OR legal_email != '' OR legal_phone != ''
+                )
             """
         
         if run_id:
@@ -377,6 +375,7 @@ ROBUST_LEGAL_CSV_COLUMNS = [
     # Identification
     'domain',
     'legal_name',
+    'registrant_name', # WHOIS Name
     'legal_form',
     
     # Structured Address (v4.0)
@@ -384,6 +383,11 @@ ROBUST_LEGAL_CSV_COLUMNS = [
     'postal_code',
     'city',
     'country',
+    
+    # Registrant Address (WHOIS)
+    'registrant_address',
+    'registrant_city',
+    'registrant_country',
     
     # Registration
     'register_type',
@@ -425,11 +429,15 @@ async def export_robust_legal_to_csv(output_path: str = None, tld_filter: str = 
             SELECT 
                 domain,
                 legal_name,
+                registrant_name,
                 legal_form,
                 COALESCE(street_address, registered_street, '') as street_address,
                 COALESCE(postal_code, registered_zip, '') as postal_code,
                 COALESCE(city, registered_city, '') as city,
                 COALESCE(country, registered_country, '') as country,
+                registrant_address,
+                registrant_city,
+                registrant_country,
                 register_type,
                 register_court,
                 registration_number,

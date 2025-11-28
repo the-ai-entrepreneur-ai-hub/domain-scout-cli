@@ -26,6 +26,7 @@ from .enhanced_extractor import EnhancedExtractor
 from .legal_extractor import LegalExtractor
 from .link_discoverer import LinkDiscoverer
 from .llm_extractor import LLMExtractor
+from .whois_enricher import WhoisEnricher
 from .utils import logger, load_settings
 
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"
@@ -54,6 +55,7 @@ class EnhancedCrawler:
         self.extractor = EnhancedExtractor()
         self.legal_extractor = LegalExtractor()
         self.link_discoverer = LinkDiscoverer()
+        self.whois_enricher = WhoisEnricher()
         self.settings = load_settings()
         
         # Initialize Session Stats (Not Global)
@@ -197,7 +199,25 @@ class EnhancedCrawler:
             enriched_data = await self.crawl_critical_pages(base_url, data, crawler)
             
             # Extract legal info if found
-            legal_info = enriched_data.pop('legal_info', None)
+            legal_info = enriched_data.pop('legal_info', {})
+            
+            # 5.5 WHOIS Enrichment (The "Hybrid Truth" Strategy)
+            # Always fetch WHOIS to separate Website Operator vs Domain Registrant
+            whois_data = self.whois_enricher.get_whois_data(domain)
+            
+            # Merge WHOIS data into legal_info for storage
+            legal_info.update(whois_data)
+            
+            # Smart Fill: If website data is missing, fallback to WHOIS
+            if not legal_info.get('legal_name') and whois_data.get('registrant_name'):
+                legal_info['legal_name'] = whois_data['registrant_name']
+                legal_info['extraction_method'] = 'whois_fallback'
+                
+            if not legal_info.get('registered_street') and whois_data.get('registrant_address'):
+                legal_info['registered_street'] = whois_data['registrant_address']
+                legal_info['registered_city'] = whois_data.get('registrant_city', '')
+                legal_info['registered_zip'] = whois_data.get('registrant_zip', '')
+                legal_info['registered_country'] = whois_data.get('registrant_country', '')
             
             # Merge address components into string for compatibility
             if enriched_data.get('address'):
@@ -393,7 +413,7 @@ class EnhancedCrawler:
             ))
             
             # Save Legal Entities if available
-            if legal_info and legal_info.get('status') == 'SUCCESS':
+            if legal_info and (legal_info.get('status') == 'SUCCESS' or legal_info.get('extraction_method') == 'whois_fallback'):
                 directors_json = json.dumps(legal_info.get('directors', []))
                 auth_reps_json = json.dumps(legal_info.get('authorized_reps', []))
                 
@@ -406,6 +426,29 @@ class EnhancedCrawler:
                 primary_phone = legal_phone or (data.get('phones', [''])[0] if data.get('phones') else '')
                 primary_email = legal_email or (data.get('emails', [''])[0] if data.get('emails') else '')
                 
+                # Map address fields to v4.0 schema (street_address, city, etc.)
+                # Prioritize registered address -> postal address -> generic address
+                street = legal_info.get('registered_street') or legal_info.get('postal_street') or data.get('address', '')
+                if isinstance(street, dict): street = street.get('street', '') # Handle if dict slipped through
+                
+                city = legal_info.get('registered_city') or legal_info.get('postal_city') or (data.get('address', {}).get('city') if isinstance(data.get('address'), dict) else '')
+                zip_code = legal_info.get('registered_zip') or legal_info.get('postal_zip') or (data.get('address', {}).get('zip') if isinstance(data.get('address'), dict) else '')
+                country = legal_info.get('registered_country') or legal_info.get('postal_country') or (data.get('address', {}).get('country') if isinstance(data.get('address'), dict) else '')
+
+                # Ensure registrant_address is a string (whois can return list)
+                def sanitize_whois_field(val):
+                    if isinstance(val, list):
+                        return ", ".join([str(x) for x in val if x])
+                    return val or ''
+
+                reg_addr = sanitize_whois_field(legal_info.get('registrant_address', ''))
+                reg_name = sanitize_whois_field(legal_info.get('registrant_name', ''))
+                reg_city = sanitize_whois_field(legal_info.get('registrant_city', ''))
+                reg_zip = sanitize_whois_field(legal_info.get('registrant_zip', ''))
+                reg_country = sanitize_whois_field(legal_info.get('registrant_country', ''))
+                reg_email = sanitize_whois_field(legal_info.get('registrant_email', ''))
+                reg_phone = sanitize_whois_field(legal_info.get('registrant_phone', ''))
+
                 await db.execute("""
                     INSERT OR REPLACE INTO legal_entities
                     (domain, legal_name, legal_form, trading_name,
@@ -416,12 +459,18 @@ class EnhancedCrawler:
                      registered_state, registered_country,
                      postal_street, postal_zip, postal_city,
                      postal_state, postal_country,
+                     street_address, postal_code, city, country,
                      legal_email, legal_phone, fax_number,
                      dpo_name, dpo_email,
                      phone, email,
+                     registrant_name, registrant_address, registrant_city, registrant_zip, registrant_country, registrant_email, registrant_phone,
                      legal_notice_url, extraction_confidence, run_id)
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                            ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 
+                            ?, ?, ?, ?,
+                            ?, ?, ?, ?, ?, ?, ?,
+                            ?, ?, ?, ?, ?, ?, ?,
+                            ?, ?, ?)
                 """, (
                     domain,
                     legal_info.get('legal_name', ''),
@@ -447,6 +496,10 @@ class EnhancedCrawler:
                     legal_info.get('postal_city', ''),
                     legal_info.get('postal_state', ''),
                     legal_info.get('postal_country', ''),
+                    street,
+                    zip_code,
+                    city,
+                    country,
                     legal_email,
                     legal_phone,
                     legal_info.get('fax', ''),
@@ -454,6 +507,13 @@ class EnhancedCrawler:
                     legal_info.get('dpo_email', ''),
                     primary_phone,
                     primary_email,
+                    reg_name,
+                    reg_addr,
+                    reg_city,
+                    reg_zip,
+                    reg_country,
+                    reg_email,
+                    reg_phone,
                     legal_info.get('legal_notice_url', ''),
                     legal_info.get('confidence', 0),
                     self.run_id

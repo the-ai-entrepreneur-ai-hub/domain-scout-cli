@@ -118,6 +118,15 @@ async def init_db():
                 dpo_name TEXT,
                 dpo_email TEXT,
                 
+                -- Domain Registrant (WHOIS Data)
+                registrant_name TEXT,
+                registrant_address TEXT,
+                registrant_city TEXT,
+                registrant_zip TEXT,
+                registrant_country TEXT,
+                registrant_email TEXT,
+                registrant_phone TEXT,
+                
                 -- Metadata
                 legal_notice_url TEXT,
                 extraction_confidence REAL,
@@ -137,6 +146,13 @@ async def init_db():
             await db.execute("ALTER TABLE legal_entities ADD COLUMN run_id TEXT")
         except Exception:
             pass
+            
+        # Add registrant columns if missing (migration)
+        for col in ['registrant_name', 'registrant_address', 'registrant_city', 'registrant_zip', 'registrant_country', 'registrant_email', 'registrant_phone']:
+            try:
+                await db.execute(f"ALTER TABLE legal_entities ADD COLUMN {col} TEXT")
+            except Exception:
+                pass
         
         # Index for faster queue lookup
         await db.execute("CREATE INDEX IF NOT EXISTS idx_queue_status ON queue(status)")

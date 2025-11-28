@@ -11,6 +11,8 @@ import phonenumbers
 from urllib.parse import urlparse
 from .utils import logger
 
+import trafilatura
+
 # Import GLiNER conditionally to avoid crashing if not installed or model fails
 try:
     from gliner import GLiNER
@@ -537,7 +539,7 @@ class LegalExtractor:
         url_lower = url.lower()
         for path in self.legal_paths:
             if path in url_lower:
-                score += 30
+                score += 40  # Boost: Definitive URL is enough to pass
                 break
                 
         # Check title
@@ -647,6 +649,11 @@ class LegalExtractor:
                 
             text = soup.get_text(separator=' ', strip=True)
             
+            # Use trafilatura for main content extraction (cleaner text for AI)
+            main_content = trafilatura.extract(html, include_comments=False, include_tables=False)
+            if not main_content:
+                main_content = text # Fallback to full text if extraction fails
+            
             # Check if this is a legal page
             is_legal, confidence = self.is_legal_page(soup, url, text)
             
@@ -695,7 +702,8 @@ class LegalExtractor:
 
             # --- 2. GLiNER ENHANCEMENT (Override/Enrich) ---
             if self.model:
-                gliner_results = self._predict_gliner(text)
+                # Use cleaner main content for GLiNER to reduce noise (like sidebar news)
+                gliner_results = self._predict_gliner(main_content)
                 
                 # Merge Legal Name (Highest Priority)
                 if 'organization' in gliner_results:
@@ -732,22 +740,28 @@ class LegalExtractor:
 
                 # Merge Address (Street, City, ZIP)
                 # Regex address extraction is brittle. GLiNER is better at components.
-                if 'street_address' in gliner_results and 'city' in gliner_results:
+                # Allow partial address extraction (don't require both street AND city)
+                if 'street_address' in gliner_results:
                     best_street = max(gliner_results['street_address'], key=lambda x: x['score'])
-                    best_city = max(gliner_results['city'], key=lambda x: x['score'])
-                    best_zip = max(gliner_results['zip_code'], key=lambda x: x['score']) if 'zip_code' in gliner_results else None
-
-                    # Construct address if we have at least street and city
-                    if best_street['score'] > 0.5 and best_city['score'] > 0.5:
-                        # Update registered address
+                    if best_street['score'] > 0.4:
                         result['registered_street'] = best_street['text']
+                
+                if 'city' in gliner_results:
+                    best_city = max(gliner_results['city'], key=lambda x: x['score'])
+                    if best_city['score'] > 0.4:
                         result['registered_city'] = best_city['text']
-                        if best_zip:
-                            result['registered_zip'] = best_zip['text']
-                        
-                        # Sanity check country
-                        if not result.get('registered_country'):
-                            result['registered_country'] = 'Germany' # Default assumption for impressum, or keep existing
+                
+                if 'zip_code' in gliner_results:
+                    best_zip = max(gliner_results['zip_code'], key=lambda x: x['score'])
+                    if best_zip['score'] > 0.4:
+                        result['registered_zip'] = best_zip['text']
+
+                # Sanity check country if we found at least a city
+                if result.get('registered_city') and not result.get('registered_country'):
+                    pass
+                # Sanity check country
+                if result.get('registered_city') and not result.get('registered_country'):
+                    pass
 
                 # Merge Registration Number (HRB/HRA)
                 if 'commercial_register_number' in gliner_results:
@@ -796,8 +810,6 @@ class LegalExtractor:
             r"geschäftsführung[.:\s]*",
             r"(?:amtsgericht|registergericht)\s+[a-zäöüß\s\-]+\s*(?:hrb|hra)\s*\d+.*",
             r"(?:hrb|hra)\s*\d+.*",
-            r"erin[.:\s]+",
-            r"er[.:\s]+",
             r"so\s+erreichen\s+sie\s+uns.*",
             r"kontakt\s+zu\s+.*",
             # NEW: More junk patterns (applied to full string, not just start)
