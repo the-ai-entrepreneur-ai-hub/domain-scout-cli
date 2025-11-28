@@ -235,6 +235,32 @@ class EnhancedCrawler:
             if legal_info and legal_info.get('status') == 'SUCCESS':
                 self.session_stats['legal_found'] += 1
             
+        except asyncio.TimeoutError:
+             # Handle timeout gracefully: if we have partial data, save it!
+            logger.warning(f"Timeout processing {domain} (partial data might be saved)")
+            
+            # Emergency WHOIS Fallback on Timeout
+            # If we timed out, we likely didn't get to the normal save block.
+            # So we try to fetch WHOIS now and save what we have.
+            try:
+                if 'enriched_data' not in locals(): enriched_data = data if 'data' in locals() else {}
+                if 'legal_info' not in locals(): legal_info = {}
+                
+                whois_data = self.whois_enricher.get_whois_data(domain)
+                legal_info.update(whois_data)
+                
+                if not legal_info.get('legal_name') and whois_data.get('registrant_name'):
+                    legal_info['legal_name'] = whois_data['registrant_name']
+                    legal_info['extraction_method'] = 'whois_fallback'
+                
+                await self.save_results(domain, enriched_data, legal_info)
+                await update_domain_status(domain_id, "PARTIAL_TIMEOUT")
+                self.session_stats['success'] += 1 # Count partials as success for now
+            except Exception as e:
+                logger.error(f"Failed to save partial results for {domain}: {e}")
+                await update_domain_status(domain_id, "FAILED_TIMEOUT")
+                self.session_stats['failed'] += 1
+            
         except Exception as e:
             logger.error(f"Error processing {domain}: {e}")
             await update_domain_status(domain_id, "FAILED_UNKNOWN")
@@ -538,7 +564,14 @@ class EnhancedCrawler:
                     )
                 except asyncio.TimeoutError:
                     logger.error(f"Domain timeout ({timeout_label}): {domain_row['domain']}")
+                    
+                    # PARTIAL SUCCESS CHECK: If we gathered any data before timeout, count it as success
+                    # Since we don't have the 'data' object here easily, we rely on the database status.
+                    # If the status is already 'COMPLETED' (from process_domain), we are good.
+                    # But process_domain sets COMPLETED at the very end.
+                    # So here, we assume if it timed out, it failed.
                     await update_domain_status(domain_row['id'], "FAILED_TIMEOUT")
+            
                 except Exception as e:
                     logger.exception(f"Worker Error: {e}")
                 finally:
