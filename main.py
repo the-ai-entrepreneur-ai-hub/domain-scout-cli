@@ -29,6 +29,7 @@ async def async_main():
     crawl_parser = subparsers.add_parser('crawl', help='Crawl domains from DB')
     crawl_parser.add_argument("--concurrency", type=int, default=10, help="Worker count")
     crawl_parser.add_argument("--limit", type=int, default=0, help="Max domains to crawl (0 = unlimited)")
+    crawl_parser.add_argument("--tld", help="Filter crawling to specific TLD (e.g., .ch)")
     crawl_parser.add_argument("--enhanced", action="store_true", help="Use enhanced crawler with JS rendering")
     crawl_parser.add_argument("--playwright", action="store_true", help="Use Playwright for JavaScript rendering")
     crawl_parser.add_argument("--use-llm", action="store_true", help="Use LLM (Ollama) for intelligent extraction")
@@ -87,11 +88,14 @@ async def async_main():
                 use_llm=getattr(args, 'use_llm', False),
                 llm_provider=getattr(args, 'llm_provider', 'ollama/deepseek-r1:7b'),
                 llm_api_base=getattr(args, 'llm_api_base', 'http://localhost:11434'),
-                ignore_robots=getattr(args, 'ignore_robots', False)
+                ignore_robots=getattr(args, 'ignore_robots', False),
+                tld_filter=getattr(args, 'tld', None)
             )
             await crawler.run()
         else:
             from src.crawler import Crawler
+            # Note: Basic crawler also needs tld_filter update if we want to support it there too.
+            # For now, applying to EnhancedCrawler as user requested.
             crawler = Crawler(
                 concurrency=args.concurrency,
                 ignore_robots=getattr(args, 'ignore_robots', False)

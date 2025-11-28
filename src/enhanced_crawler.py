@@ -30,7 +30,8 @@ from .utils import logger, load_settings
 class EnhancedCrawler:
     def __init__(self, concurrency: int = 5, use_playwright: bool = True, limit: int = 0,
                  use_llm: bool = False, llm_provider: str = "ollama/deepseek-r1:7b",
-                 llm_api_base: str = "http://localhost:11434", ignore_robots: bool = False):
+                 llm_api_base: str = "http://localhost:11434", ignore_robots: bool = False,
+                 tld_filter: Optional[str] = None):
         if not CRAWL4AI_AVAILABLE:
             raise ImportError("Crawl4AI is not installed. Please run: pip install crawl4ai")
 
@@ -38,6 +39,7 @@ class EnhancedCrawler:
         self.limit = limit  # 0 = unlimited
         self.use_llm = use_llm
         self.ignore_robots = ignore_robots
+        self.tld_filter = tld_filter
         self.run_id = str(uuid.uuid4())  # Unique ID for this crawl session
         logger.info(f"Initialized EnhancedCrawler with Run ID: {self.run_id}")
         if limit > 0:
@@ -450,7 +452,7 @@ class EnhancedCrawler:
                 remaining = (self.limit - domains_queued) if self.limit > 0 else 50
                 batch_size = min(50, remaining) if self.limit > 0 else 50
                 
-                batch = await get_pending_domains(limit=batch_size)
+                batch = await get_pending_domains(limit=batch_size, tld_filter=self.tld_filter)
                 if not batch:
                     break
                 

@@ -253,28 +253,35 @@ async def get_statistics():
 async def export_legal_entities_to_csv(output_path: str = None, tld_filter: str = None, run_id: str = None, full_metadata_only: bool = True):
     """
     Export legal entity information to CSV.
-    
-    By default (full_metadata_only=True), only exports entries with COMPLETE metadata:
-    1) Company name (legal_name)
-    2) Legal form
-    3) Full postal address (street, ZIP, city, country)
-    4) Authorized representatives (CEO/directors)
-    5) Contact info (email AND phone)
-    6) Register details (type, court, number)
     """
-    
-    # NOTE: Don't default to latest run - export ALL data if no run specified
-    # This allows exporting accumulated data across multiple runs
     
     # Always use timestamp in filename
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    if not output_path:
-        run_suffix = f"_{run_id[:8]}" if run_id else ""
-        output_path = f"data/legal_entities_{timestamp}{run_suffix}.csv"
+    
+    # Filename Enhancement: Include TLD and/or Run ID for context
+    # Example: legal_entities_ch_20251127.csv or legal_entities_all_20251127_runid.csv
+    filename_parts = ["legal_entities"]
+    if tld_filter:
+        filename_parts.append(tld_filter.replace('.', ''))
     else:
-        # Add timestamp to user-provided path
+        filename_parts.append("all")
+        
+    filename_parts.append(timestamp)
+    
+    if run_id:
+        filename_parts.append(run_id[:8])
+        
+    default_filename = "_".join(filename_parts) + ".csv"
+
+    if not output_path:
+        output_path = f"data/{default_filename}"
+    else:
+        # If path provided, ensure parent dir exists but maybe append timestamp if not present?
+        # User might provide specific name "my_export.csv". Let's respect it but ensure directory.
         p = Path(output_path)
-        output_path = str(p.parent / f"{p.stem}_{timestamp}{p.suffix}")
+        # Check if user path already has timestamp-like pattern? 
+        # Actually, let's just use what they gave if they gave it, or default if not.
+        pass
         
     output_path = Path(output_path)
     output_path.parent.mkdir(exist_ok=True)
@@ -334,7 +341,11 @@ async def export_legal_entities_to_csv(output_path: str = None, tld_filter: str 
             columns = [desc[0] for desc in cursor.description]
             
     if not rows:
-        logger.warning(f"No legal entities with full metadata found to export (Run ID: {run_id})")
+        logger.warning(f"No legal entities with full metadata found to export (Run ID: {run_id or 'ANY'})")
+        if not full_metadata_only:
+             logger.info("Tip: Try running crawl again or checking logs for failures.")
+        else:
+             logger.info("Tip: Use --include-incomplete to see partial results.")
         return output_path
         
     # Write to CSV with JSON field unpacking and UTF-8 BOM for Windows Excel compatibility

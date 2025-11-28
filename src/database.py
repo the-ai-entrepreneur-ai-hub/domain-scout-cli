@@ -160,14 +160,27 @@ async def insert_domains(domains: list[tuple[str, str]]):
         await db.commit()
         logger.info(f"Inserted/Processed {len(domains)} domains into DB.")
 
-async def get_pending_domains(limit: int = 100):
-    """Fetches pending domains from the queue."""
+async def get_pending_domains(limit: int = 100, tld_filter: Optional[str] = None):
+    """
+    Fetches pending domains from the queue.
+    Optionally filters by TLD.
+    """
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
-        cursor = await db.execute(
-            "SELECT id, domain FROM queue WHERE status = 'PENDING' LIMIT ?",
-            (limit,)
-        )
+        
+        if tld_filter:
+            tld = tld_filter if tld_filter.startswith('.') else f".{tld_filter}"
+            pattern = f"%{tld}"
+            cursor = await db.execute(
+                "SELECT id, domain FROM queue WHERE status = 'PENDING' AND domain LIKE ? LIMIT ?",
+                (pattern, limit)
+            )
+        else:
+            cursor = await db.execute(
+                "SELECT id, domain FROM queue WHERE status = 'PENDING' LIMIT ?",
+                (limit,)
+            )
+            
         rows = await cursor.fetchall()
         return rows
 
