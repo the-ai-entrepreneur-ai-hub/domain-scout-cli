@@ -677,7 +677,8 @@ class EnhancedCrawler:
                 SELECT status, COUNT(*) FROM queue 
                 WHERE status IN ('COMPLETED', 'PENDING', 'PROCESSING', 
                                  'FAILED_DNS', 'FAILED_FETCH', 'FAILED_HTTP', 
-                                 'FAILED_TIMEOUT', 'FAILED_UNKNOWN', 'PARKED', 'BLACKLISTED')
+                                 'FAILED_TIMEOUT', 'FAILED_UNKNOWN', 'PARKED', 'BLACKLISTED',
+                                 'PARTIAL_TIMEOUT')
                 GROUP BY status
             """)
             counts = dict(await cursor.fetchall())
@@ -689,11 +690,14 @@ class EnhancedCrawler:
         # Get pending count from DB (accurate)
         pending = counts.get('PENDING', 0)
         
+        # Calculate total completed (Completed + Partial)
+        total_success = counts.get('COMPLETED', 0) + counts.get('PARTIAL_TIMEOUT', 0)
+        
         logger.info(f"")
         logger.info(f"  [SESSION] Processed: {self.session_stats['processed']} | "
                    f"Success: {self.session_stats['success']} | "
                    f"Failed: {self.session_stats['failed']} | "
                    f"Legal Found: {self.session_stats['legal_found']} | "
                    f"Rate: {session_rate:.1f}/min")
-        logger.info(f"  [GLOBAL]  Total Completed: {counts.get('COMPLETED', 0)} | "
+        logger.info(f"  [GLOBAL]  Total Completed: {total_success} | "
                    f"Total Pending: {pending}")
