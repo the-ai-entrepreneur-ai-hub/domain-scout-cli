@@ -193,6 +193,22 @@ python test_legal_extraction.py
 
 ---
 
+## Configuration
+
+### Blacklist
+You can exclude specific domains or keywords by adding them to `config/blacklist.txt`. The crawler supports live reloading of this file, so you can add domains while the crawler is running.
+- **Exact Match**: Blocks exact domain names.
+- **Keyword Match**: Blocks any domain containing the keyword.
+
+Example `config/blacklist.txt`:
+```text
+google.com
+amazon.de
+example.com
+```
+
+---
+
 ## Troubleshooting
 
 **"DNS Failed" errors?**

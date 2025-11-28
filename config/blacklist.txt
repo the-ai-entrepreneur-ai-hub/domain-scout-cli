@@ -96,3 +96,8 @@ gov.uk
 bund.de
 admin.ch
 gouv.fr
+google.de
+focus.de
+otto.de
+amazon.de
+ebay.de

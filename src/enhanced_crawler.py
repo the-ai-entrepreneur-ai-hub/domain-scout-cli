@@ -77,21 +77,36 @@ class EnhancedCrawler:
                 self.use_llm = False
         
         # Load blacklist
+        self.blacklist_path = Path("config/blacklist.txt")
+        self.last_blacklist_mtime = 0
         self.blacklist = set()
-        blacklist_path = Path("config/blacklist.txt")
-        if blacklist_path.exists():
-            with open(blacklist_path, 'r') as f:
-                self.blacklist = {line.strip() for line in f if line.strip()}
+        self._reload_blacklist()
                 
         # Settings
         self.delay_min = float(self.settings.get("delay_min", 1))
         self.delay_max = float(self.settings.get("delay_max", 3))
         self.max_pages_per_domain = int(self.settings.get("max_pages_per_domain", 5))
 
+    def _reload_blacklist(self):
+        """Reload blacklist if file has changed."""
+        if self.blacklist_path.exists():
+            try:
+                mtime = self.blacklist_path.stat().st_mtime
+                if mtime > self.last_blacklist_mtime:
+                    with open(self.blacklist_path, 'r') as f:
+                        self.blacklist = {line.strip() for line in f if line.strip()}
+                    self.last_blacklist_mtime = mtime
+                    logger.info(f"Blacklist loaded/updated ({len(self.blacklist)} domains)")
+            except Exception as e:
+                logger.error(f"Error reloading blacklist: {e}")
+
     async def process_domain(self, domain_row, crawler: AsyncWebCrawler):
         """Process a single domain using the provided crawler instance."""
         domain_id, domain = domain_row['id'], domain_row['domain']
         self.session_stats['processed'] += 1
+        
+        # 0. Live Blacklist Reload
+        self._reload_blacklist()
         
         # 1. Blacklist check
         if any(b in domain for b in self.blacklist):
@@ -118,7 +133,7 @@ class EnhancedCrawler:
             try:
                 result = await asyncio.wait_for(
                     crawler.arun(url=base_url, bypass_cache=True, headers={'User-Agent': USER_AGENT}),
-                    timeout=30.0
+                    timeout=25.0
                 )
             except asyncio.TimeoutError:
                 logger.warning(f"Timeout on HTTPS for {domain}, trying HTTP...")
@@ -129,7 +144,7 @@ class EnhancedCrawler:
                 try:
                     result = await asyncio.wait_for(
                         crawler.arun(url=base_url, bypass_cache=True, headers={'User-Agent': USER_AGENT}),
-                        timeout=30.0
+                        timeout=25.0
                     )
                 except asyncio.TimeoutError:
                     logger.warning(f"Timeout on HTTP for {domain}")
@@ -141,7 +156,7 @@ class EnhancedCrawler:
                 try:
                     result = await asyncio.wait_for(
                         crawler.arun(url=base_url, bypass_cache=True, headers={'User-Agent': USER_AGENT}),
-                        timeout=30.0
+                        timeout=20.0
                     )
                 except asyncio.TimeoutError:
                     pass
@@ -382,7 +397,7 @@ class EnhancedCrawler:
             try:
                 res = await asyncio.wait_for(
                     crawler.arun(url=page_url, headers={'User-Agent': USER_AGENT}),
-                    timeout=20.0
+                    timeout=15.0
                 )
             except asyncio.TimeoutError:
                 logger.warning(f"Timeout crawling {page_url}")
@@ -593,8 +608,9 @@ class EnhancedCrawler:
     async def worker(self, queue):
         """Worker process with timeout protection."""
         # Longer timeout when LLM is enabled (LLM calls can take 30-90s)
-        domain_timeout = 300.0 if self.use_llm else 120.0
-        timeout_label = "5min" if self.use_llm else "2min"
+        # Increased default timeout to 5 minutes to accommodate retries and critical page crawling
+        domain_timeout = 600.0 if self.use_llm else 300.0
+        timeout_label = "10min" if self.use_llm else "5min"
         
         # Initialize Crawler context per worker (efficient reuse)
         async with AsyncWebCrawler(verbose=False) as crawler:
