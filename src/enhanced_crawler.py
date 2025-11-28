@@ -104,9 +104,9 @@ class EnhancedCrawler:
         
         # 2. DNS check (Soft Check)
         if not await self.dns_checker.check_domain(domain):
-            logger.warning(f"DNS check failed for {domain}, skipping to avoid crawler timeouts.")
-            await update_domain_status(domain_id, "FAILED_DNS")
-            self.session_stats['failed'] += 1
+            logger.warning(f"DNS check failed for {domain}, attempting WHOIS fallback...")
+            # Try WHOIS anyway
+            await self._handle_failure_with_whois(domain, domain_id, "PARTIAL_DNS")
             return
             
         base_url = f"https://{domain}"
@@ -159,11 +159,11 @@ class EnhancedCrawler:
                 error_msg = result.error_message if result else "No response"
                 # Check for HTTP error codes
                 if "ERR_HTTP_RESPONSE_CODE_FAILURE" in str(error_msg):
-                    await update_domain_status(domain_id, "FAILED_HTTP")
+                    logger.warning(f"HTTP failure for {domain}, attempting WHOIS fallback...")
+                    await self._handle_failure_with_whois(domain, domain_id, "PARTIAL_HTTP")
                 else:
-                    logger.warning(f"Failed to fetch {domain}: {error_msg}")
-                    await update_domain_status(domain_id, "FAILED_FETCH")
-                self.session_stats['failed'] += 1
+                    logger.warning(f"Failed to fetch {domain}: {error_msg}, attempting WHOIS fallback...")
+                    await self._handle_failure_with_whois(domain, domain_id, "PARTIAL_FETCH")
                 return
 
             html = result.html
@@ -177,9 +177,8 @@ class EnhancedCrawler:
                     logger.info(f"Completed via httpx fallback (empty HTML): {domain}")
                     return
 
-                logger.warning(f"Empty HTML response for {domain}")
-                await update_domain_status(domain_id, "FAILED_FETCH")
-                self.session_stats['failed'] += 1
+                logger.warning(f"Empty HTML response for {domain}, attempting WHOIS fallback...")
+                await self._handle_failure_with_whois(domain, domain_id, "PARTIAL_FETCH")
                 return
             
             # 4. Extract data
@@ -264,6 +263,41 @@ class EnhancedCrawler:
         except Exception as e:
             logger.error(f"Error processing {domain}: {e}")
             await update_domain_status(domain_id, "FAILED_UNKNOWN")
+            self.session_stats['failed'] += 1
+
+    async def _handle_failure_with_whois(self, domain: str, domain_id: int, status_code: str):
+        """
+        Fallback handler: Fetches WHOIS data when website crawl fails.
+        Saves partial result and marks success if WHOIS data found.
+        """
+        try:
+            whois_data = self.whois_enricher.get_whois_data(domain)
+            
+            # Prepare partial data structure
+            legal_info = whois_data.copy()
+            
+            # Promote registrant name to legal name if missing
+            if whois_data.get('registrant_name'):
+                legal_info['legal_name'] = whois_data['registrant_name']
+                legal_info['extraction_method'] = 'whois_fallback_only'
+            
+            # Basic enriched data wrapper
+            enriched_data = {
+                'domain': domain,
+                'company_name': legal_info.get('legal_name', ''),
+                'address': legal_info.get('registrant_address', '')
+            }
+            
+            await self.save_results(domain, enriched_data, legal_info)
+            await update_domain_status(domain_id, status_code)
+            self.session_stats['success'] += 1
+            logger.info(f"Saved WHOIS fallback for {domain} (Status: {status_code})")
+            
+        except Exception as e:
+            logger.error(f"WHOIS fallback failed for {domain}: {e}")
+            # If even WHOIS fails, then it's a true failure
+            final_status = status_code.replace("PARTIAL", "FAILED")
+            await update_domain_status(domain_id, final_status)
             self.session_stats['failed'] += 1
 
     async def _httpx_fallback(self, base_url: str, domain: str) -> Optional[Dict]:
@@ -690,7 +724,7 @@ class EnhancedCrawler:
                 WHERE status IN ('COMPLETED', 'PENDING', 'PROCESSING', 
                                  'FAILED_DNS', 'FAILED_FETCH', 'FAILED_HTTP', 
                                  'FAILED_TIMEOUT', 'FAILED_UNKNOWN', 'PARKED', 'BLACKLISTED',
-                                 'PARTIAL_TIMEOUT')
+                                 'PARTIAL_TIMEOUT', 'PARTIAL_DNS', 'PARTIAL_HTTP', 'PARTIAL_FETCH')
                 GROUP BY status
             """)
             counts = dict(await cursor.fetchall())
@@ -703,7 +737,13 @@ class EnhancedCrawler:
         pending = counts.get('PENDING', 0)
         
         # Calculate total completed (Completed + Partial)
-        total_success = counts.get('COMPLETED', 0) + counts.get('PARTIAL_TIMEOUT', 0)
+        total_success = (
+            counts.get('COMPLETED', 0) + 
+            counts.get('PARTIAL_TIMEOUT', 0) + 
+            counts.get('PARTIAL_DNS', 0) + 
+            counts.get('PARTIAL_HTTP', 0) +
+            counts.get('PARTIAL_FETCH', 0)
+        )
         
         logger.info(f"")
         logger.info(f"  [SESSION] Processed: {self.session_stats['processed']} | "
