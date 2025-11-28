@@ -53,6 +53,14 @@ class EnhancedCrawler:
         self.link_discoverer = LinkDiscoverer()
         self.settings = load_settings()
         
+        # Initialize Session Stats (Not Global)
+        self.session_stats = {
+            'processed': 0,
+            'success': 0,
+            'failed': 0,
+            'legal_found': 0
+        }
+        
         # Initialize LLM extractor if enabled
         self.llm_extractor = None
         if use_llm:
@@ -78,11 +86,13 @@ class EnhancedCrawler:
     async def process_domain(self, domain_row, crawler: AsyncWebCrawler):
         """Process a single domain using the provided crawler instance."""
         domain_id, domain = domain_row['id'], domain_row['domain']
+        self.session_stats['processed'] += 1
         
         # 1. Blacklist check
         if any(b in domain for b in self.blacklist):
             logger.info(f"Skipping blacklisted: {domain}")
             await update_domain_status(domain_id, "BLACKLISTED")
+            self.session_stats['failed'] += 1
             return
             
         await update_domain_status(domain_id, "PROCESSING")
@@ -91,6 +101,7 @@ class EnhancedCrawler:
         if not await self.dns_checker.check_domain(domain):
             logger.warning(f"DNS failed: {domain}")
             await update_domain_status(domain_id, "FAILED_DNS")
+            self.session_stats['failed'] += 1
             return
             
         base_url = f"https://{domain}"
@@ -138,12 +149,14 @@ class EnhancedCrawler:
                 else:
                     logger.warning(f"Failed to fetch {domain}: {error_msg}")
                     await update_domain_status(domain_id, "FAILED_FETCH")
+                self.session_stats['failed'] += 1
                 return
 
             html = result.html
             if not html:
                 logger.warning(f"Empty HTML response for {domain}")
                 await update_domain_status(domain_id, "FAILED_FETCH")
+                self.session_stats['failed'] += 1
                 return
             
             # 4. Extract data
@@ -151,6 +164,7 @@ class EnhancedCrawler:
             
             if data.get('status') == 'PARKED':
                 await update_domain_status(domain_id, "PARKED")
+                self.session_stats['failed'] += 1 # Count parked as 'failed' for goal purposes
                 return
             
             # 4.5 Discover critical pages (smart discovery + links found)
@@ -175,10 +189,15 @@ class EnhancedCrawler:
             await self.save_results(domain, enriched_data, legal_info)
             
             await update_domain_status(domain_id, "COMPLETED")
+            self.session_stats['success'] += 1
+            
+            if legal_info and legal_info.get('status') == 'SUCCESS':
+                self.session_stats['legal_found'] += 1
             
         except Exception as e:
             logger.error(f"Error processing {domain}: {e}")
             await update_domain_status(domain_id, "FAILED_UNKNOWN")
+            self.session_stats['failed'] += 1
 
     async def crawl_critical_pages(self, base_url: str, initial_data: Dict, crawler: AsyncWebCrawler) -> Dict:
         """Crawl critical pages like /contact, /about, /impressum."""
@@ -469,20 +488,21 @@ class EnhancedCrawler:
             
             # Final stats
             elapsed = asyncio.get_event_loop().time() - self.stats['start_time']
-            total_processed = self.stats['completed'] + self.stats['failed']
             
             logger.info(f"")
             logger.info(f"=" * 60)
             logger.info(f"  CRAWL FINISHED")
             logger.info(f"=" * 60)
-            logger.info(f"  Run ID:    {self.run_id}")
-            logger.info(f"  Completed: {self.stats['completed']}")
-            logger.info(f"  Failed:    {self.stats['failed']}")
-            logger.info(f"  Time:      {elapsed/60:.1f} minutes")
+            logger.info(f"  Run ID:      {self.run_id}")
+            logger.info(f"  Processed:   {self.session_stats['processed']}")
+            logger.info(f"  Successful:  {self.session_stats['success']}")
+            logger.info(f"  Legal Found: {self.session_stats['legal_found']}")
+            logger.info(f"  Failed:      {self.session_stats['failed']}")
+            logger.info(f"  Time:        {elapsed/60:.1f} minutes")
             logger.info(f"=" * 60)
             logger.info(f"")
             logger.info(f"  To export results, run:")
-            logger.info(f"  python main.py export --legal-only")
+            logger.info(f"  python main.py export --legal-only --run-id {self.run_id} --include-incomplete")
             logger.info(f"")
 
     async def _progress_reporter(self):
@@ -493,6 +513,7 @@ class EnhancedCrawler:
     
     async def _print_progress(self):
         """Print current progress stats."""
+        # Show global stats from DB
         async with aiosqlite.connect(DB_PATH) as db:
             # Get current counts
             cursor = await db.execute("""
@@ -504,25 +525,18 @@ class EnhancedCrawler:
             """)
             counts = dict(await cursor.fetchall())
         
-        completed = counts.get('COMPLETED', 0)
-        pending = counts.get('PENDING', 0)
-        processing = counts.get('PROCESSING', 0)
-        failed = sum(v for k, v in counts.items() if k.startswith('FAILED_') or k in ('PARKED', 'BLACKLISTED'))
-        
-        total = completed + pending + processing + failed
-        if total == 0:
-            return
-            
-        pct = (completed + failed) / total * 100
+        # Calculate session rates
         elapsed = asyncio.get_event_loop().time() - self.stats['start_time']
-        rate = (completed + failed) / elapsed * 60 if elapsed > 0 else 0
+        session_rate = (self.session_stats['processed']) / elapsed * 60 if elapsed > 0 else 0
         
-        # Update stats
-        self.stats['completed'] = completed
-        self.stats['failed'] = failed
+        # Get pending count from DB (accurate)
+        pending = counts.get('PENDING', 0)
         
         logger.info(f"")
-        logger.info(f"  PROGRESS: {completed + failed}/{total} ({pct:.1f}%) | "
-                   f"OK: {completed} | FAIL: {failed} | "
-                   f"Rate: {rate:.1f}/min | "
-                   f"Pending: {pending}")
+        logger.info(f"  [SESSION] Processed: {self.session_stats['processed']} | "
+                   f"Success: {self.session_stats['success']} | "
+                   f"Failed: {self.session_stats['failed']} | "
+                   f"Legal Found: {self.session_stats['legal_found']} | "
+                   f"Rate: {session_rate:.1f}/min")
+        logger.info(f"  [GLOBAL]  Total Completed: {counts.get('COMPLETED', 0)} | "
+                   f"Total Pending: {pending}")

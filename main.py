@@ -129,6 +129,23 @@ def main():
     try:
         # Note: Do NOT use WindowsSelectorEventLoopPolicy on Windows
         # Playwright/Crawl4AI requires ProactorEventLoop for subprocess support
+        
+        # Suppress ProactorBasePipeTransport errors on shutdown
+        if sys.platform == 'win32':
+            from functools import wraps
+            from asyncio.proactor_events import _ProactorBasePipeTransport
+            
+            def silence_event_loop_closed(func):
+                @wraps(func)
+                def wrapper(self, *args, **kwargs):
+                    try:
+                        return func(self, *args, **kwargs)
+                    except RuntimeError:
+                        pass
+                return wrapper
+                
+            _ProactorBasePipeTransport.__del__ = silence_event_loop_closed(_ProactorBasePipeTransport.__del__)
+
         asyncio.run(async_main())
     except KeyboardInterrupt:
         logger.info("Interrupted by user.")
