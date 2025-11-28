@@ -34,10 +34,14 @@ playwright install chromium
 
 ### 2. Basic Workflow
 ```bash
-# 1. Discover domains
-python main.py discover --tld de --limit 500
+# 1. Discover & Crawl Automatically (Recommended)
+python main.py discover --tld .de --crawl --concurrency 10
 
-# 2. Crawl with AI (Recommended)
+# 2. Manual Workflow
+# Step A: Discover domains
+python main.py discover --tld .de --limit 500
+
+# Step B: Crawl with AI
 python main.py crawl --enhanced --limit 100 --ignore-robots
 
 # 3. Export Data
@@ -61,14 +65,20 @@ The crawler now uses a hybrid approach to solve common extraction problems:
 
 ## Step-by-Step Usage
 
-### Step 1: Find Domains (Discovery)
-Populate your queue with active domains for a specific region.
+### Step 1: Automated Discovery & Crawling (New)
+The easiest way to start. Discovers domains and immediately starts crawling them.
+```bash
+python main.py discover --tld .de --crawl --concurrency 5
+```
+
+### Step 2: Manual Discovery (Optional)
+If you want to just populate the queue first.
 ```bash
 python main.py discover --tld .de --limit 1000
 ```
 
-### Step 2: Extract Data (Crawling)
-Run the enhanced crawler. This uses the AI model to parse legal pages.
+### Step 3: Manual Crawling (Optional)
+Run the enhanced crawler on existing queued items.
 ```bash
 python main.py crawl --enhanced --concurrency 10 --ignore-robots
 ```

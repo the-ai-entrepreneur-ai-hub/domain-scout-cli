@@ -8,6 +8,7 @@ import random
 from pathlib import Path
 from typing import Dict, List, Optional
 from urllib.parse import urljoin, urlparse
+import httpx
 
 # Try importing Crawl4AI
 try:
@@ -26,6 +27,8 @@ from .legal_extractor import LegalExtractor
 from .link_discoverer import LinkDiscoverer
 from .llm_extractor import LLMExtractor
 from .utils import logger, load_settings
+
+USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"
 
 class EnhancedCrawler:
     def __init__(self, concurrency: int = 5, use_playwright: bool = True, limit: int = 0,
@@ -97,9 +100,9 @@ class EnhancedCrawler:
             
         await update_domain_status(domain_id, "PROCESSING")
         
-        # 2. DNS check
+        # 2. DNS check (Soft Check)
         if not await self.dns_checker.check_domain(domain):
-            logger.warning(f"DNS failed: {domain}")
+            logger.warning(f"DNS check failed for {domain}, skipping to avoid crawler timeouts.")
             await update_domain_status(domain_id, "FAILED_DNS")
             self.session_stats['failed'] += 1
             return
@@ -112,7 +115,7 @@ class EnhancedCrawler:
             
             try:
                 result = await asyncio.wait_for(
-                    crawler.arun(url=base_url, bypass_cache=True),
+                    crawler.arun(url=base_url, bypass_cache=True, headers={'User-Agent': USER_AGENT}),
                     timeout=30.0
                 )
             except asyncio.TimeoutError:
@@ -123,7 +126,7 @@ class EnhancedCrawler:
                 base_url = f"http://{domain}"
                 try:
                     result = await asyncio.wait_for(
-                        crawler.arun(url=base_url, bypass_cache=True),
+                        crawler.arun(url=base_url, bypass_cache=True, headers={'User-Agent': USER_AGENT}),
                         timeout=30.0
                     )
                 except asyncio.TimeoutError:
@@ -135,13 +138,22 @@ class EnhancedCrawler:
                 logger.info(f"Retrying with www: {base_url}")
                 try:
                     result = await asyncio.wait_for(
-                        crawler.arun(url=base_url, bypass_cache=True),
+                        crawler.arun(url=base_url, bypass_cache=True, headers={'User-Agent': USER_AGENT}),
                         timeout=30.0
                     )
                 except asyncio.TimeoutError:
                     pass
                 
             if not result or not result.success:
+                # Static fallback with httpx before giving up
+                httpx_data = await self._httpx_fallback(base_url, domain)
+                if httpx_data:
+                    await self.save_results(domain, httpx_data, None)
+                    await update_domain_status(domain_id, "COMPLETED")
+                    self.session_stats['success'] += 1
+                    logger.info(f"Completed via httpx fallback: {domain}")
+                    return
+
                 error_msg = result.error_message if result else "No response"
                 # Check for HTTP error codes
                 if "ERR_HTTP_RESPONSE_CODE_FAILURE" in str(error_msg):
@@ -154,6 +166,15 @@ class EnhancedCrawler:
 
             html = result.html
             if not html:
+                # Try static fallback once
+                httpx_data = await self._httpx_fallback(base_url, domain)
+                if httpx_data:
+                    await self.save_results(domain, httpx_data, None)
+                    await update_domain_status(domain_id, "COMPLETED")
+                    self.session_stats['success'] += 1
+                    logger.info(f"Completed via httpx fallback (empty HTML): {domain}")
+                    return
+
                 logger.warning(f"Empty HTML response for {domain}")
                 await update_domain_status(domain_id, "FAILED_FETCH")
                 self.session_stats['failed'] += 1
@@ -199,34 +220,77 @@ class EnhancedCrawler:
             await update_domain_status(domain_id, "FAILED_UNKNOWN")
             self.session_stats['failed'] += 1
 
+    async def _httpx_fallback(self, base_url: str, domain: str) -> Optional[Dict]:
+        """
+        Lightweight fallback when Playwright/Crawl4AI fails.
+        Fetches a single page with httpx and runs the enhanced extractor.
+        """
+        try:
+            async with httpx.AsyncClient(timeout=15, follow_redirects=True, verify=False) as client:
+                resp = await client.get(base_url, headers={'User-Agent': USER_AGENT})
+                if resp.status_code >= 400 or not resp.text:
+                    return None
+                html = resp.text
+        except Exception as e:
+            logger.debug(f"httpx fallback failed for {domain}: {e}")
+            return None
+
+        data = self.extractor.extract(html, domain, base_url)
+        if data.get('status') != 'SUCCESS':
+            return None
+
+        # Try to find legal links even in fallback mode
+        legal_links = self.link_discoverer.extract_legal_links_smart(html, base_url)
+        if legal_links:
+            data['critical_pages'] = data.get('critical_pages', []) + legal_links
+
+        # Recalculate confidence in case extractor didn't set it
+        data['confidence_score'] = self.extractor.calculate_confidence_score(data)
+        return data
+
     async def crawl_critical_pages(self, base_url: str, initial_data: Dict, crawler: AsyncWebCrawler) -> Dict:
-        """Crawl critical pages like /contact, /about, /impressum."""
+        """Crawl critical pages. Prioritizes discovered links, then falls back to TLD-specific guesses."""
         critical_pages = initial_data.get('critical_pages', [])
         
-        # Ensure legal paths are prioritized
-        legal_paths = ['/impressum', '/imprint', '/legal-notice', '/legal', 
-                      '/contact', '/about', '/company']
+        # TLD-specific Fallbacks (Smart Discovery)
+        # Only use these if we didn't find good links on the homepage
+        tld = base_url.split('.')[-1].lower()
+        if '/' in tld: tld = tld.split('/')[0] # Handle edge cases
         
+        fallbacks = []
+        if tld in ['de', 'ch', 'at']:
+            fallbacks = ['/impressum', '/kontakt', '/datenschutz']
+        elif tld in ['uk', 'com', 'org', 'net', 'io', 'ai']:
+            fallbacks = ['/contact', '/about', '/legal', '/privacy', '/terms']
+        elif tld in ['fr']:
+            fallbacks = ['/mentions-legales', '/contact']
+        elif tld in ['it']:
+            fallbacks = ['/contatti', '/note-legali']
+        elif tld in ['es']:
+            fallbacks = ['/contacto', '/aviso-legal']
+        else:
+            # Generic fallback for others
+            fallbacks = ['/contact', '/about', '/legal', '/impressum']
+
         # De-duplicate and filter
         pages_to_crawl = []
-        seen = {base_url}
+        seen = {base_url, base_url + '/'}
         
-        # Add discovered pages first
+        # 1. Add discovered pages FIRST (Highest Priority)
         for url in critical_pages:
             if url not in seen:
                 pages_to_crawl.append(url)
                 seen.add(url)
                 
-        # Add defaults if missing
-        for path in legal_paths:
+        # 2. Add fallbacks ONLY if we have few discovered pages (or to be safe)
+        # We limit the number of fallbacks to avoid 404 spam
+        for path in fallbacks:
             url = urljoin(base_url, path)
             if url not in seen:
-                # Only add if it wasn't discovered but might exist
-                # We'll try a few speculative ones
                 pages_to_crawl.append(url)
                 seen.add(url)
 
-        # Limit
+        # Limit total pages to crawl per domain
         pages_to_crawl = pages_to_crawl[:self.max_pages_per_domain]
         
         merged_data = initial_data.copy()
@@ -237,7 +301,7 @@ class EnhancedCrawler:
             # Crawl page with timeout
             try:
                 res = await asyncio.wait_for(
-                    crawler.arun(url=page_url),
+                    crawler.arun(url=page_url, headers={'User-Agent': USER_AGENT}),
                     timeout=20.0
                 )
             except asyncio.TimeoutError:

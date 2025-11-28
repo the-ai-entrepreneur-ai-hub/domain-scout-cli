@@ -25,6 +25,12 @@ async def async_main():
     discover_parser.add_argument("--print-sample", action="store_true", help="Print discovered domains after discovery")
     discover_parser.add_argument("--print-limit", type=int, default=50, help="Number of domains to print with --print-sample")
     
+    # Chained Crawl Options for Discovery
+    discover_parser.add_argument("--crawl", action="store_true", help="Automatically run crawler after discovery")
+    discover_parser.add_argument("--concurrency", type=int, default=5, help="Worker count for chained crawl")
+    discover_parser.add_argument("--crawl-limit", type=int, default=0, help="Max domains to crawl (0 = unlimited)")
+    discover_parser.add_argument("--enhanced", action="store_true", default=True, help="Use enhanced crawler (default: True)")
+    
     # Crawl Command
     crawl_parser = subparsers.add_parser('crawl', help='Crawl domains from DB')
     crawl_parser.add_argument("--concurrency", type=int, default=10, help="Worker count")
@@ -77,6 +83,19 @@ async def async_main():
                 logger.info(f"Sample of discovered domains (up to {args.print_limit}):")
                 for row in rows:
                     logger.info(f"{row['domain']} (source={row['source']})")
+        
+        # Auto-trigger crawl if requested
+        if args.crawl:
+            logger.info(f"Automatically starting crawler for TLD: {tld}...")
+            from src.enhanced_crawler import EnhancedCrawler
+            crawler = EnhancedCrawler(
+                concurrency=args.concurrency,
+                use_playwright=True,  # Default to True for auto-crawl
+                limit=args.crawl_limit,
+                use_llm=False, # Default to False for auto-crawl unless specified (future)
+                tld_filter=tld
+            )
+            await crawler.run()
         
     elif args.task == 'crawl':
         if args.enhanced:

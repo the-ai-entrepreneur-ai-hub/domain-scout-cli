@@ -8,6 +8,7 @@ from typing import Dict, List, Optional, Tuple, Any
 from bs4 import BeautifulSoup, Tag
 from langdetect import detect
 import phonenumbers
+from urllib.parse import urlparse
 from .utils import logger
 
 # Import GLiNER conditionally to avoid crashing if not installed or model fails
@@ -756,6 +757,9 @@ class LegalExtractor:
                         curr_reg = result.get('registration_number')
                         if not curr_reg or len(curr_reg) > 20: # Garbage regex result
                             result['registration_number'] = best_reg['text']
+            
+            # Clean up obvious government/public-sector cases misclassified as GmbH/LLC
+            result = self.sanitize_public_sector(result, url, text)
 
             return result
             
@@ -922,3 +926,23 @@ class LegalExtractor:
             return bool(pattern.match(vat))
             
         return False
+
+    def sanitize_public_sector(self, result: Dict[str, Any], url: str, text: str) -> Dict[str, Any]:
+        """
+        If the page clearly describes a government/public entity, drop private-company legal forms.
+        """
+        try:
+            domain = urlparse(url).netloc.lower()
+        except Exception:
+            domain = ""
+        text_lower = (text or "").lower()
+        public_markers = ['verwaltung', 'kanton', 'government', 'ministerium', 'municipality', 'stadt', 'canton']
+        if any(marker in text_lower for marker in public_markers):
+            form = (result.get('legal_form') or '').lower()
+            corporate_forms = {f.lower() for forms in self.legal_forms.values() for f in forms}
+            if form in corporate_forms:
+                result['legal_form'] = ''
+        # If domain is clearly governmental (.gov or .gv.*), also strip corporate form
+        if domain.endswith('.gov') or '.gov.' in domain or '.gv.' in domain:
+            result['legal_form'] = ''
+        return result

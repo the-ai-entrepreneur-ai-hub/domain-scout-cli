@@ -19,6 +19,30 @@ TRANCO_FILE = DATA_DIR / "top-1m.csv"
 MAJESTIC_FILE = DATA_DIR / "majestic_million.csv"
 UMBRELLA_FILE = DATA_DIR / "umbrella-top-1m.csv"
 
+# Subdomains that almost always lead to DNS/timeouts and non-HTML targets
+SKIP_SUBDOMAIN_PREFIXES = {
+    "mail", "smtp", "imap", "pop", "pop3", "mx", "dns", "ns", "ns1", "ns2",
+    "p", "api", "cdn", "static", "assets", "open", "rss", "ftp", "webmail"
+}
+
+def should_skip_domain(domain: str) -> bool:
+    """
+    Filters out noisy/non-HTML domains before queueing.
+    Drops service subdomains (mail, api, cdn, dns, etc.).
+    """
+    if not domain:
+        return True
+    d = str(domain).strip().lower()
+    # Disallow obvious path/port noise
+    if "/" in d or ":" in d:
+        return True
+    parts = d.split(".")
+    if len(parts) >= 3:
+        sub = parts[0]
+        if sub in SKIP_SUBDOMAIN_PREFIXES:
+            return True
+    return False
+
 def setup_data_dir():
     DATA_DIR.mkdir(exist_ok=True)
 
@@ -65,6 +89,8 @@ async def ingest_tranco_domains(tld: str, limit: int = 1000):
                 domain_iter = chunk['domain']
 
             for domain in domain_iter:
+                if should_skip_domain(domain):
+                    continue
                 batch.append((domain, "TRANCO"))
                 count += 1
                 
@@ -153,7 +179,7 @@ async def ingest_majestic_domains(tld: str, limit: int = 1000):
 
             for domain in domain_iter:
                 domain = str(domain).strip().lower()
-                if domain:
+                if domain and not should_skip_domain(domain):
                     batch.append((domain, "MAJESTIC"))
                     count += 1
 
@@ -204,7 +230,7 @@ async def ingest_umbrella_domains(tld: str, limit: int = 1000):
 
             for domain in domain_iter:
                 domain = str(domain).strip().lower()
-                if domain:
+                if domain and not should_skip_domain(domain):
                     batch.append((domain, "UMBRELLA"))
                     count += 1
 
@@ -265,7 +291,7 @@ async def ingest_common_crawl_domains(tld: str, limit: int = 100):
                     if url:
                         parsed = urlparse(url)
                         domain = parsed.netloc
-                        if domain and domain not in processed:
+                        if domain and domain not in processed and not should_skip_domain(domain):
                             processed.add(domain)
                             batch.append((domain, "COMMON_CRAWL"))
                             
@@ -325,7 +351,7 @@ async def ingest_search_engine_domains(tld: str, limit: int = 50):
                         parsed = urlparse(href)
 
                 domain = parsed.netloc.split(":")[0]
-                if not domain or domain in seen:
+                if not domain or domain in seen or should_skip_domain(domain):
                     continue
                 if suffix and not domain.endswith(f".{suffix}"):
                     continue
@@ -379,7 +405,7 @@ async def ingest_crtsh_domains(tld: str, limit: int = 100):
                 name = cert.get("common_name") or cert.get("name_value", "")
                 for part in name.replace("\n", " ").split():
                     part = part.strip().lower().lstrip("*.")
-                    if not part or part in seen:
+                    if not part or part in seen or should_skip_domain(part):
                         continue
                     if not part.endswith(f".{suffix}"):
                         continue
@@ -445,7 +471,7 @@ async def ingest_wayback_domains(tld: str, limit: int = 100):
                 url = row[0] if isinstance(row, list) else row
                 parsed = urlparse(url if url.startswith("http") else f"http://{url}")
                 domain = parsed.netloc.split(":")[0].lower()
-                if not domain or domain in seen:
+                if not domain or domain in seen or should_skip_domain(domain):
                     continue
                 if not domain.endswith(f".{suffix}"):
                     continue
@@ -507,7 +533,7 @@ async def ingest_bing_search(tld: str, limit: int = 50):
 
                 parsed = urlparse(href)
                 domain = parsed.netloc.split(":")[0].lower()
-                if not domain or domain in seen:
+                if not domain or domain in seen or should_skip_domain(domain):
                     continue
                 if "bing.com" in domain or "microsoft.com" in domain:
                     continue

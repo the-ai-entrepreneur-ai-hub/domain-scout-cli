@@ -86,6 +86,14 @@ For every discovered website, the system MUST extract all publicly available leg
 *   **Field Validation:** All extracted data must pass validation before storage
 *   **Structured Address Output:** Separate fields for street, ZIP, city, country
 
+### 3.6 Automated Workflow (New)
+*   **Chained Execution:** Users can trigger discovery and crawling in a single command.
+*   **CLI Argument:** `--crawl` flag added to the `discover` command.
+*   **Behavior:**
+    1.  Runs discovery for specified TLD.
+    2.  Immediately initializes `EnhancedCrawler`.
+    3.  Processes the newly discovered domains (and any pending ones).
+
 ### 3.4 Data Extraction & Quality (Enhanced)
 *   **Parked Domain Detection:** Advanced ML-based classification for parking pages, including visual similarity detection.
 *   **Multi-Page Crawling:** Automatically discover and crawl critical pages (/about, /contact, /impressum, /team).

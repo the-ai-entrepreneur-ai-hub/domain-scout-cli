@@ -62,6 +62,12 @@ class EnhancedExtractor:
             'get this domain', 'domain expired', 'renew now'
         ]
 
+        # Titles that should not be treated as company names
+        self.generic_titles = {
+            'welcome', 'willkommen', 'home', 'homepage', 'startseite',
+            'index', 'default', 'untitled', 'contact', 'about'
+        }
+
     def extract_structured_data(self, html: str, base_url: str) -> Dict[str, Any]:
         """Extract all structured data formats from HTML."""
         try:
@@ -281,8 +287,9 @@ class EnhancedExtractor:
         if candidates:
             # Sort by priority
             candidates.sort(key=lambda x: x[1], reverse=True)
-            return candidates[0][0]
-            
+            for name, _priority in candidates:
+                if name and name.strip().lower() not in self.generic_titles:
+                    return name.strip()
         return domain
 
     def extract_all_emails(self, soup: BeautifulSoup, text: str) -> List[str]:
@@ -291,7 +298,9 @@ class EnhancedExtractor:
         
         # 1. From mailto links
         for link in soup.find_all('a', href=re.compile(r'^mailto:')):
-            email = link.get('href', '').replace('mailto:', '').split('?')[0]
+            href = link.get('href', '')
+            if not href: continue
+            email = href.replace('mailto:', '').split('?')[0]
             if email:
                 emails.add(email.lower())
                 
@@ -314,7 +323,9 @@ class EnhancedExtractor:
         
         # 1. From tel: links
         for link in soup.find_all('a', href=re.compile(r'^tel:')):
-            phone = link.get('href', '').replace('tel:', '')
+            href = link.get('href', '')
+            if not href: continue
+            phone = href.replace('tel:', '')
             if phone:
                 phones.add(phone)
                 
@@ -339,7 +350,7 @@ class EnhancedExtractor:
                 
         return valid_phones
 
-    def extract_address(self, soup: BeautifulSoup, structured_data: Dict) -> Dict[str, str]:
+    def extract_address(self, soup: BeautifulSoup, structured_data: Dict, country_hint: Optional[str] = None) -> Dict[str, str]:
         """Extract physical address components."""
         address = {
             'street': '',
@@ -354,7 +365,7 @@ class EnhancedExtractor:
             if data.get('address'):
                 # Often structured data returns a string, try to parse it if so
                 if isinstance(data['address'], str):
-                    parsed = self.parse_address_string(data['address'])
+                    parsed = self.parse_address_string(data['address'], country_hint=country_hint)
                     if parsed['city']:
                         return parsed
                 elif isinstance(data.get('address'), dict):
@@ -366,7 +377,7 @@ class EnhancedExtractor:
         if address_tag:
             addr_text = address_tag.get_text(separator=', ').strip()
             if addr_text and len(addr_text) > 10:
-                return self.parse_address_string(addr_text)
+                return self.parse_address_string(addr_text, country_hint=country_hint)
                 
         # 3. From footer or contact section (Heuristic)
         # Look for patterns like: "Musterstraße 1, 12345 Musterstadt"
@@ -382,6 +393,9 @@ class EnhancedExtractor:
                 'country': 'DE' # Inference
             }
 
+        # If we have a country hint, apply it when nothing else was found
+        if country_hint and not address.get('country'):
+            address['country'] = country_hint
         return address
 
     def parse_address_string(self, addr_text: str, country_hint: str = None) -> Dict[str, str]:
@@ -440,6 +454,8 @@ class EnhancedExtractor:
                 street_parts = before_zip.split(',')
                 result['street'] = street_parts[-1].strip() if street_parts else ''
         
+        if country_hint and not result.get('country'):
+            result['country'] = country_hint
         return result
 
     def extract_social_profiles(self, soup: BeautifulSoup, structured_data: Dict) -> Dict[str, str]:
@@ -611,7 +627,7 @@ class EnhancedExtractor:
                 'company_name': self.extract_company_name(soup, structured_data, domain),
                 'emails': self.extract_all_emails(soup, text),
                 'phones': self.extract_all_phones(soup, text, country_hint),
-                'address': self.extract_address(soup, structured_data),
+                'address': self.extract_address(soup, structured_data, country_hint),
                 'social_profiles': self.extract_social_profiles(soup, structured_data),
             }
             
