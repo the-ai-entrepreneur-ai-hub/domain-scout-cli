@@ -8,6 +8,7 @@
 - **Smart Discovery**: Finds legal pages (/impressum, /imprint) automatically.
 - **Multi-Source**: Discovers domains from 8+ sources (Tranco, CommonCrawl, etc.).
 - **Resilient**: Handles DNS issues, timeouts, and robots.txt blocks intelligently.
+- **Hybrid Truth (WHOIS)**: Combines website data (Imprint) with official domain registration data (WHOIS) for 100% coverage.
 
 ---
 
@@ -15,6 +16,8 @@
 
 - [Quick Start Guide](#quick-start-guide)
 - [New AI Features](#new-ai-features)
+- [Hybrid Truth (WHOIS Integration)](#hybrid-truth-whois-integration)
+- [End-to-End Testing](#end-to-end-testing)
 - [Step-by-Step Usage](#step-by-step-usage)
 - [Legal Data Extraction](#legal-data-extraction)
 - [Command Reference](#command-reference)
@@ -44,7 +47,7 @@ python main.py discover --tld .de --limit 500
 # Step B: Crawl with AI
 python main.py crawl --enhanced --limit 100 --ignore-robots
 
-# 3. Export Data
+# 3. Export Data (Includes WHOIS + Website Data)
 python main.py export --legal-only --include-incomplete
 ```
 
@@ -60,6 +63,57 @@ The crawler now uses a hybrid approach to solve common extraction problems:
 | **Address** | Confused by multi-line text | **Structured extraction** (Street, City, ZIP) |
 | **Context** | Blind pattern matching | **Understands "Managing Director" vs "Contact"** |
 | **DNS Handling** | Failed on root domains | **Smart Fallback** (tries `www.` automatically) |
+
+---
+
+## Hybrid Truth (WHOIS Integration)
+
+The system now implements a **"Hybrid Truth"** strategy. It captures data from two independent sources to ensure you get the full picture:
+
+1.  **Website Operator** (from `/impressum`): The company *operating* the site.
+2.  **Domain Registrant** (from WHOIS): The company *owning* the domain name.
+
+**Why is this important?**
+Often, a brand website (e.g., `peek-cloppenburg.at`) is operated by a local subsidiary (`Fashion ID GmbH`) but owned by a holding company (`JC New Retail AG`). Our export now shows **BOTH** side-by-side.
+
+**How it works:**
+- **Website Data**: Extracted via AI/Regex from the legal page.
+- **Registrant Data**: Fetched via the `whois` protocol directly from the registry.
+- **Smart Fill**: If the website is down or missing legal info, we fallback to WHOIS data to ensure *something* is always captured.
+
+---
+
+## End-to-End Testing
+
+To verify the system is working correctly on your machine:
+
+### 1. Unit Test (Verify WHOIS Module)
+Check if the WHOIS enrichment is working standalone:
+```bash
+python test_whois.py
+```
+*Expected Output*: JSON data showing registrant info for `peek-cloppenburg.at`.
+
+### 2. Integration Test (Single Domain)
+Run a full crawl on a known tricky domain to prove DB storage works:
+```bash
+python main.py crawl --enhanced --limit 1 --tld .at
+```
+*(Note: This picks the next available .at domain. For a specific target, clear the queue first.)*
+
+### 3. Batch Test (10 Domains)
+Run a small batch to verify stability and export format:
+```bash
+# 1. Reset queue (optional)
+python main.py reset
+
+# 2. Run batch crawl
+python main.py crawl --enhanced --limit 10 --concurrency 5 --tld .at
+
+# 3. Export and check results
+python main.py export --legal-only --include-incomplete
+```
+*Check the generated CSV file in the `data/` folder. It should have columns for `legal_name` AND `registrant_name`.*
 
 ---
 

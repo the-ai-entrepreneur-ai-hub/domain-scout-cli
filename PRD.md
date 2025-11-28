@@ -46,6 +46,11 @@ The system must identify target domains and persist them before crawling.
 *   **Runtime Control:** Stop gracefully if a file named `STOP` is detected in the root directory.
 
 ### 3.3 Legal & Company Disclosure Extraction (NEW)
+*   **Hybrid Truth Strategy (Website + WHOIS):**
+    *   Primary Source: Website `/impressum` or `/legal` pages (Website Operator).
+    *   Secondary Source: Domain Registry WHOIS data (Domain Registrant).
+    *   Reconciliation: Both datasets stored side-by-side to reveal "Operator" vs "Owner" discrepancies.
+    *   Fallback: If website is down or data is missing, WHOIS data fills the gaps.
 *   **Legal Notice Detection:** Automatically identify and prioritize legal pages:
     - /impressum (German), /legal-notice, /legal, /imprint
     - /mentions-legales (French), /aviso-legal (Spanish)
