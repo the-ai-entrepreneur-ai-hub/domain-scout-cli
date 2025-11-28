@@ -57,6 +57,9 @@ async def async_main():
     # Reset Command
     subparsers.add_parser('reset', help='Reset FAILED domains to PENDING')
     
+    # Reset DB Command
+    subparsers.add_parser('reset-db', help='Wipe the entire database (WARNING: Irreversible)')
+    
     # Stats Command
     subparsers.add_parser('stats', help='Show crawling statistics')
 
@@ -139,6 +142,20 @@ async def async_main():
     elif args.task == 'reset':
         from src.reset_tool import reset_failed_domains
         await reset_failed_domains()
+        
+    elif args.task == 'reset-db':
+        from src.database import DB_PATH
+        import os
+        try:
+            if os.path.exists(DB_PATH):
+                os.remove(DB_PATH)
+                logger.info(f"Database wiped successfully: {DB_PATH}")
+                await init_db() # Re-initialize empty DB
+                logger.info("New empty database created.")
+            else:
+                logger.warning("Database file not found.")
+        except Exception as e:
+            logger.error(f"Failed to wipe database: {e}")
         
     elif args.task == 'stats':
         from src.enhanced_storage import print_statistics

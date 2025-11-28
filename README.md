@@ -173,6 +173,12 @@ Retry failed domains (useful after fixing network issues).
 python main.py reset
 ```
 
+### Wipe Database (New)
+Start fresh by deleting all discovered domains and results. **Warning: Irreversible.**
+```bash
+python main.py reset-db
+```
+
 ### Statistics
 View progress and success rates.
 ```bash
