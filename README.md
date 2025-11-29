@@ -219,7 +219,9 @@ example.com
 - Use the `--ignore-robots` flag to bypass.
 
 **Export file is empty or has few rows?**
-- Use `--include-incomplete` flag. By default, the exporter is very strict (requires ALL 6 fields).
+- **New Default:** The exporter now accumulates results from **ALL runs** by default.
+- Use `--include-incomplete` flag to see partial results.
+- Use `--run-id latest` if you ONLY want the most recent batch.
 
 ---
 

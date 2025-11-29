@@ -50,7 +50,7 @@ async def async_main():
     export_parser.add_argument("--enhanced", action="store_true", help="Export enhanced results")
     export_parser.add_argument("--json", action="store_true", help="Export as JSON instead of CSV")
     export_parser.add_argument("--legal-only", action="store_true", help="Export only legal entity information")
-    export_parser.add_argument("--run-id", help="Export data for a specific Run ID (defaults to latest run)")
+    export_parser.add_argument("--run-id", help="Export data for a specific Run ID (use 'latest' for most recent run, defaults to ALL runs)")
     export_parser.add_argument("--include-incomplete", action="store_true", 
                                help="Include entries without full metadata (default: only export complete records)")
     

@@ -20,14 +20,18 @@ async def export_enhanced_to_csv(output_path: str = None, tld_filter: str = None
     """Export enhanced results to CSV with all fields including legal information."""
     
     # Default to latest run if not specified
-    if not run_id:
+    # CHANGED: Default to ALL runs to match user expectation of "exporting what I see in stats"
+    # User can still provide specific run_id if needed
+    if run_id == 'latest':
         run_id = await get_latest_run_id()
         if run_id:
-            logger.info(f"No run_id specified, defaulting to latest run: {run_id}")
+            logger.info(f"Exporting latest run: {run_id}")
+    elif not run_id:
+        logger.info("No run_id specified, exporting aggregated results from ALL runs")
     
     if not output_path:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        run_suffix = f"_{run_id[:8]}" if run_id else ""
+        run_suffix = f"_{run_id[:8]}" if run_id else "_all"
         output_path = f"data/enhanced_results_{timestamp}{run_suffix}.csv"
         
     output_path = Path(output_path)
@@ -110,12 +114,15 @@ async def export_enhanced_to_csv(output_path: str = None, tld_filter: str = None
 async def export_enhanced_to_json(output_path: str = None, tld_filter: str = None, run_id: str = None):
     """Export enhanced results to JSON format."""
     
-    if not run_id:
+    if run_id == 'latest':
         run_id = await get_latest_run_id()
+    elif not run_id:
+        # Default to ALL runs
+        pass
         
     if not output_path:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        run_suffix = f"_{run_id[:8]}" if run_id else ""
+        run_suffix = f"_{run_id[:8]}" if run_id else "_all"
         output_path = f"data/enhanced_results_{timestamp}{run_suffix}.json"
         
     output_path = Path(output_path)
@@ -255,6 +262,14 @@ async def export_legal_entities_to_csv(output_path: str = None, tld_filter: str 
     """
     Export legal entity information to CSV.
     """
+    
+    # Handle 'latest' keyword
+    if run_id == 'latest':
+        run_id = await get_latest_run_id()
+        if run_id:
+            logger.info(f"Exporting latest run (Legal): {run_id}")
+    elif not run_id:
+        logger.info("No run_id specified, exporting aggregated Legal entities from ALL runs")
     
     # Always use timestamp in filename
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")

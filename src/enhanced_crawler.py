@@ -456,7 +456,7 @@ class EnhancedCrawler:
 
     async def save_results(self, domain, data, legal_info):
         """Save results to DB with run_id."""
-        async with aiosqlite.connect(DB_PATH) as db:
+        async with aiosqlite.connect(DB_PATH, timeout=60.0) as db:
             # Save Enhanced Results
             emails_str = ','.join(data.get('emails', []))
             phones_str = ','.join(data.get('phones', []))
@@ -613,38 +613,53 @@ class EnhancedCrawler:
         timeout_label = "10min" if self.use_llm else "5min"
         
         # Initialize Crawler context per worker (efficient reuse)
-        async with AsyncWebCrawler(verbose=False) as crawler:
-            while True:
-                domain_row = await queue.get()
-                try:
-                    await asyncio.wait_for(
-                        self.process_domain(domain_row, crawler),
-                        timeout=domain_timeout
-                    )
-                except asyncio.TimeoutError:
-                    logger.error(f"Domain timeout ({timeout_label}): {domain_row['domain']}")
+        # Move AsyncWebCrawler inside the loop to recreate it on critical failure
+        while True:
+            try:
+                # Re-initialize crawler if it crashed or was closed
+                async with AsyncWebCrawler(verbose=False) as crawler:
+                    while True:
+                        domain_row = await queue.get()
+                        try:
+                            await asyncio.wait_for(
+                                self.process_domain(domain_row, crawler),
+                                timeout=domain_timeout
+                            )
+                        except asyncio.TimeoutError:
+                            logger.error(f"Domain timeout ({timeout_label}): {domain_row['domain']}")
+                            
+                            # Emergency WHOIS Fallback on Timeout
+                            try:
+                                # We rely on process_domain to handle the WHOIS fallback internally now.
+                                # This catch block is just a safety net for the hard worker timeout.
+                                await update_domain_status(domain_row['id'], "FAILED_TIMEOUT")
+                                self.session_stats['failed'] += 1
+                            except Exception:
+                                pass
                     
-                    # Emergency WHOIS Fallback on Timeout
-                    try:
-                        # We rely on process_domain to handle the WHOIS fallback internally now.
-                        # This catch block is just a safety net for the hard worker timeout.
-                        await update_domain_status(domain_row['id'], "FAILED_TIMEOUT")
-                        self.session_stats['failed'] += 1
-                    except Exception:
-                        pass
-            
-                except Exception as e:
-                    logger.exception(f"Worker Error: {e}")
-                    self.session_stats['failed'] += 1
-                finally:
-                    queue.task_done()
+                        except Exception as e:
+                            # Check for browser/context closed error
+                            error_str = str(e)
+                            if "Target page, context or browser has been closed" in error_str:
+                                logger.error(f"Browser context crashed: {e}. Restarting crawler instance...")
+                                queue.task_done() # Mark current task as done (failed)
+                                self.session_stats['failed'] += 1
+                                break # Break inner loop to restart crawler context
+                            
+                            logger.exception(f"Worker Error: {e}")
+                            self.session_stats['failed'] += 1
+                        finally:
+                            queue.task_done()
+            except Exception as e:
+                logger.error(f"Critical Worker Restart: {e}")
+                await asyncio.sleep(5) # Cool down before restarting worker loop
 
     async def run(self):
         logger.info(f"Starting Crawl Run {self.run_id} with {self.concurrency} workers.")
         logger.info(f"Press Ctrl+C or create STOP file to stop and export results.")
         
         # Get total pending count for progress tracking
-        async with aiosqlite.connect(DB_PATH) as db:
+        async with aiosqlite.connect(DB_PATH, timeout=60.0) as db:
             cursor = await db.execute("SELECT COUNT(*) FROM queue WHERE status = 'PENDING'")
             total_pending = (await cursor.fetchone())[0]
         
@@ -688,7 +703,10 @@ class EnhancedCrawler:
                 
                 # Calculate how many more to fetch
                 remaining = (self.limit - domains_queued) if self.limit > 0 else 50
-                batch_size = min(50, remaining) if self.limit > 0 else 50
+                
+                # Keep workers fed: Fetch at least 20 items per worker
+                min_batch = self.concurrency * 20
+                batch_size = min(min_batch, remaining) if self.limit > 0 else min_batch
                 
                 batch = await get_pending_domains(limit=batch_size, tld_filter=self.tld_filter)
                 if not batch:
@@ -733,7 +751,7 @@ class EnhancedCrawler:
     async def _print_progress(self):
         """Print current progress stats."""
         # Show global stats from DB
-        async with aiosqlite.connect(DB_PATH) as db:
+        async with aiosqlite.connect(DB_PATH, timeout=60.0) as db:
             # Get current counts
             cursor = await db.execute("""
                 SELECT status, COUNT(*) FROM queue 

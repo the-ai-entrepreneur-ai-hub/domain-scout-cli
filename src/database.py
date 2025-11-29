@@ -10,7 +10,7 @@ async def init_db():
     """Initializes the database with required tables."""
     DB_PATH.parent.mkdir(exist_ok=True)
     
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with aiosqlite.connect(DB_PATH, timeout=60.0) as db:
         # Enable WAL mode for better concurrency
         await db.execute("PRAGMA journal_mode=WAL;")
         await db.execute("PRAGMA synchronous=NORMAL;") # Optional, but good for speed/safety balance
@@ -172,7 +172,7 @@ async def insert_domains(domains: list[tuple[str, str]]):
     if not domains:
         return
 
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with aiosqlite.connect(DB_PATH, timeout=60.0) as db:
         await db.executemany(
             "INSERT OR IGNORE INTO queue (domain, source) VALUES (?, ?)",
             domains
@@ -185,7 +185,7 @@ async def get_pending_domains(limit: int = 100, tld_filter: Optional[str] = None
     Fetches pending domains from the queue.
     Optionally filters by TLD.
     """
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with aiosqlite.connect(DB_PATH, timeout=60.0) as db:
         db.row_factory = aiosqlite.Row
         
         if tld_filter:
@@ -206,7 +206,7 @@ async def get_pending_domains(limit: int = 100, tld_filter: Optional[str] = None
 
 async def update_domain_status(domain_id: int, status: str):
     """Updates the status of a domain in the queue."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with aiosqlite.connect(DB_PATH, timeout=60.0) as db:
         await db.execute(
             "UPDATE queue SET status = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
             (status, domain_id)
@@ -217,7 +217,7 @@ async def get_sample_domains(tld: Optional[str] = None, limit: int = 50):
     """
     Fetches a sample of domains (optionally filtered by TLD) ordered by newest first.
     """
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with aiosqlite.connect(DB_PATH, timeout=60.0) as db:
         db.row_factory = aiosqlite.Row
         if tld:
             suffix = tld if tld.startswith('.') else f".{tld}"
