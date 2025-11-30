@@ -587,3 +587,193 @@ async def print_statistics():
             print(f"  {field}: {coverage}")
             
     print("="*50)
+
+def classify_company_size(legal_form: str, employee_count: int = 0) -> str:
+    """
+    Heuristic classification of company size based on legal form and data.
+    """
+    if employee_count > 250:
+        return "enterprise"
+    if employee_count > 10:
+        return "sme"
+        
+    form = (legal_form or "").lower()
+    
+    # Enterprise indicators
+    if any(x in form for x in ['ag', 'se', 'kgaa', 'aktiengesellschaft']):
+        return "enterprise"
+        
+    # SME indicators (GmbH is standard, could be large but default to SME)
+    if any(x in form for x in ['gmbh', 'co. kg', 'limited', 'ltd', 'sarl', 's.a.', 's.r.l']):
+        return "sme"
+        
+    # Solo/Micro indicators
+    if any(x in form for x in ['ug', 'gbr', 'e.k.', 'einzelunternehmen', 'freiberufler', 'selbstständig']):
+        return "solo"
+        
+    # Default fallback
+    return "sme"
+
+async def export_unified(output_path: str = None, tld_filter: str = None, run_id: str = None):
+    """
+    Export Unified Results (Client Spec Compliance).
+    A single "Golden Record" CSV with strict schema.
+    """
+    # Handle 'latest' keyword
+    if run_id == 'latest':
+        run_id = await get_latest_run_id()
+    
+    if not output_path:
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        output_path = f"data/unified_results_{timestamp}.csv"
+        
+    output_path = Path(output_path)
+    output_path.parent.mkdir(exist_ok=True)
+    
+    async with aiosqlite.connect(DB_PATH) as db:
+        # Join results_enhanced, legal_entities, and queue (for robots status)
+        
+        query = """
+            SELECT 
+                r.domain, r.crawled_at, r.run_id,
+                l.legal_name, r.company_name as web_company_name,
+                l.legal_form,
+                l.registration_number,
+                l.ceo_name, l.directors,
+                r.industry,
+                r.emails, r.phones,
+                l.fax as fax_number,
+                COALESCE(l.street_address, l.registered_street) as street,
+                COALESCE(l.postal_code, l.registered_zip) as postal_code,
+                COALESCE(l.city, l.registered_city) as city,
+                COALESCE(l.country, l.registered_country) as country,
+                r.description as service_product_description,
+                r.social_linkedin, r.social_twitter, r.social_facebook, r.social_instagram, r.social_youtube,
+                l.registrant_name as whois_created_date, -- Placeholder if not available column
+                q.status as robots_allowed -- Placeholder, need actual column
+            FROM results_enhanced r
+            LEFT JOIN legal_entities l ON r.domain = l.domain
+            LEFT JOIN queue q ON r.domain = q.domain
+            WHERE 1=1
+        """
+        
+        params = []
+        if run_id:
+            query += " AND r.run_id = ?"
+            params.append(run_id)
+            
+        if tld_filter:
+            tld = tld_filter if tld_filter.startswith('.') else f'.{tld_filter}'
+            query += " AND r.domain LIKE ?"
+            params.append(f'%{tld}')
+            
+        query += " ORDER BY r.confidence_score DESC"
+        
+        try:
+            async with db.execute(query, params) as cursor:
+                rows = await cursor.fetchall()
+        except Exception as e:
+            logger.error(f"Unified export query failed: {e}")
+            return
+            
+    if not rows:
+        logger.warning("No results found for unified export.")
+        return
+
+    # Client Spec Columns
+    columns = [
+        # REGISTRY
+        'company_name', 'legal_form', 'registration_number', 'ceo_names', 
+        'owner_organization', 'industry', 'company_size',
+        # CONTACT
+        'emails', 'phone_numbers', 'fax_numbers',
+        # LOCATION
+        'street', 'postal_code', 'city', 'country',
+        # PRODUCT
+        'service_product_description',
+        # SOCIAL
+        'social_links',
+        # META
+        'website_created_at', 'website_last_updated_at',
+        # TECH
+        'domain', 'crawled_at', 'run_id',
+        # PERMS
+        'robots_allowed', 'robots_reason'
+    ]
+    
+    with open(output_path, 'w', newline='', encoding='utf-8-sig') as f:
+        writer = csv.DictWriter(f, fieldnames=columns)
+        writer.writeheader()
+        
+        for row in rows:
+            # Unpack row tuple (index based on query order)
+            (domain, crawled_at, run_id_val,
+             legal_name, web_company_name,
+             legal_form, reg_num,
+             ceo_name, directors,
+             industry,
+             emails, phones, fax,
+             street, zip_code, city, country,
+             desc,
+             li, tw, fb, ig, yt,
+             whois_date, robots_status) = row
+            
+            # Logic: Company Name
+            final_name = legal_name if legal_name else web_company_name
+            
+            # Logic: CEO Names
+            ceos = []
+            if ceo_name: ceos.append(ceo_name)
+            if directors:
+                try:
+                    dirs = json.loads(directors)
+                    if isinstance(dirs, list): ceos.extend(dirs)
+                except: pass
+            final_ceos = "; ".join(list(set(ceos)))
+            
+            # Logic: Social Links
+            socials = {}
+            if li: socials['linkedin'] = li
+            if fb: socials['facebook'] = fb
+            if ig: socials['instagram'] = ig
+            if tw: socials['twitter'] = tw
+            if yt: socials['youtube'] = yt
+            social_str = json.dumps(socials) if socials else ""
+            
+            # Logic: Company Size
+            size = classify_company_size(legal_form)
+            
+            # Logic: Contact formatting
+            email_str = emails.replace(',', '; ') if emails else ""
+            phone_str = phones.replace(',', '; ') if phones else ""
+            
+            record = {
+                'company_name': final_name,
+                'legal_form': legal_form,
+                'registration_number': reg_num,
+                'ceo_names': final_ceos,
+                'owner_organization': "", # Not currently extracted reliably
+                'industry': industry,
+                'company_size': size,
+                'emails': email_str,
+                'phone_numbers': phone_str,
+                'fax_numbers': fax,
+                'street': street,
+                'postal_code': zip_code,
+                'city': city,
+                'country': country,
+                'service_product_description': (desc or "")[:500],
+                'social_links': social_str,
+                'website_created_at': "", # Need WHOIS column in DB
+                'website_last_updated_at': "", # Need Headers column in DB
+                'domain': domain,
+                'crawled_at': crawled_at,
+                'run_id': run_id_val,
+                'robots_allowed': "True" if robots_status != "FAILED_ROBOTS" else "False", # Approx logic until column added
+                'robots_reason': ""
+            }
+            
+            writer.writerow(record)
+            
+    logger.info(f"Exported {len(rows)} unified results to {output_path}")
+    return output_path

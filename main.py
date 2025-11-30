@@ -20,8 +20,9 @@ async def async_main():
     
     # Discovery Command
     discover_parser = subparsers.add_parser('discover', help='Discover domains and populate DB')
-    discover_parser.add_argument("--tld", required=True, help="Top-Level Domain (e.g., .de). Use 'all' or '*' for any TLD.")
+    discover_parser.add_argument("--tld", required=False, help="Top-Level Domain (e.g., .de). Use 'all' or '*' for any TLD.")
     discover_parser.add_argument("--limit", type=int, default=100, help="Max domains to find")
+    discover_parser.add_argument("--company-size", default="all", choices=['all', 'smb', 'enterprise'], help="Target specific company sizes.")
     discover_parser.add_argument("--print-sample", action="store_true", help="Print discovered domains after discovery")
     discover_parser.add_argument("--print-limit", type=int, default=50, help="Number of domains to print with --print-sample")
     
@@ -36,7 +37,7 @@ async def async_main():
     crawl_parser.add_argument("--concurrency", type=int, default=10, help="Worker count")
     crawl_parser.add_argument("--limit", type=int, default=0, help="Max domains to crawl (0 = unlimited)")
     crawl_parser.add_argument("--tld", help="Filter crawling to specific TLD (e.g., .ch)")
-    crawl_parser.add_argument("--enhanced", action="store_true", help="Use enhanced crawler with JS rendering")
+    crawl_parser.add_argument("--enhanced", action="store_true", default=True, help="Use enhanced crawler with JS rendering (default: True)")
     crawl_parser.add_argument("--playwright", action="store_true", help="Use Playwright for JavaScript rendering")
     crawl_parser.add_argument("--use-llm", action="store_true", help="Use LLM (Ollama) for intelligent extraction")
     crawl_parser.add_argument("--llm-provider", default="ollama/deepseek-r1:7b", help="LLM provider string")
@@ -50,6 +51,7 @@ async def async_main():
     export_parser.add_argument("--enhanced", action="store_true", help="Export enhanced results")
     export_parser.add_argument("--json", action="store_true", help="Export as JSON instead of CSV")
     export_parser.add_argument("--legal-only", action="store_true", help="Export only legal entity information")
+    export_parser.add_argument("--unified", action="store_true", help="Export unified results (Client Spec Compliance)")
     export_parser.add_argument("--run-id", help="Export data for a specific Run ID (use 'latest' for most recent run, defaults to ALL runs)")
     export_parser.add_argument("--include-incomplete", action="store_true", 
                                help="Include entries without full metadata (default: only export complete records)")
@@ -69,14 +71,14 @@ async def async_main():
     await init_db()
     
     if args.task == 'discover':
-        raw_tld = args.tld.strip()
+        raw_tld = args.tld.strip() if args.tld else ""
         any_mode = raw_tld.lower() in {"all", "any", "*", ""}
         tld = None if any_mode else raw_tld
         if tld and not tld.startswith('.'):
             tld = f".{tld}"
             
-        logger.info(f"Starting Discovery for {tld or 'ANY'}")
-        await run_discovery(tld, args.limit)
+        logger.info(f"Starting Discovery for {tld or 'ANY'} (Size: {args.company_size})")
+        await run_discovery(tld, args.limit, args.company_size)
         logger.info("Discovery complete. Check 'queue' table in DB.")
         if args.print_sample:
             rows = await get_sample_domains(tld, args.print_limit)
@@ -115,20 +117,24 @@ async def async_main():
             )
             await crawler.run()
         else:
-            from src.crawler import Crawler
-            # Note: Basic crawler also needs tld_filter update if we want to support it there too.
-            # For now, applying to EnhancedCrawler as user requested.
-            crawler = Crawler(
+             # Fallback for non-enhanced mode (Legacy)
+             # Only use if explicitly requested, but default is enhanced anyway via CLI in v2
+             logger.warning("Running in LEGACY mode (Regex-only). Use --enhanced for best results.")
+             from src.crawler import Crawler
+             crawler = Crawler(
                 concurrency=args.concurrency,
                 ignore_robots=getattr(args, 'ignore_robots', False)
-            )
-            await crawler.run()
+             )
+             await crawler.run()
         
     elif args.task == 'export':
         if getattr(args, 'legal_only', False):
             from src.enhanced_storage import export_legal_entities_to_csv
             full_metadata_only = not getattr(args, 'include_incomplete', False)
             await export_legal_entities_to_csv(args.output, args.tld, args.run_id, full_metadata_only)
+        elif getattr(args, 'unified', False):
+            from src.enhanced_storage import export_unified
+            await export_unified(args.output, args.tld, args.run_id)
         elif args.enhanced:
             from src.enhanced_storage import export_enhanced_to_csv, export_enhanced_to_json
             if args.json:

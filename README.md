@@ -1,27 +1,23 @@
-# Intelligent Web Crawler with Legal Entity Extraction (AI-Enhanced)
+# SMB Web Crawler v2 (AI-Enhanced)
 
-**Welcome!** This is a custom-built tool designed to automatically find and extract comprehensive business and legal information from websites. It now features a **Hybrid AI Engine** (GLiNER + Regex) to provide highly accurate data extraction for difficult fields like Company Names and Addresses.
+**Welcome!** This is a custom-built tool designed to automatically find and extract comprehensive business and legal information from websites. It is optimized for finding Small & Medium Businesses (SMBs) that are often missed by standard crawlers.
 
 **Key Features:**
-- **AI-Powered Extraction**: Uses GLiNER (Generalist Lightweight NER) to semantically understand legal pages.
-- **High Accuracy**: Extracts clean company names (e.g., "TechCorp GmbH") without junk prefixes.
-- **Smart Discovery**: Finds legal pages (/impressum, /imprint) automatically.
-- **Multi-Source**: Discovers domains from 8+ sources (Tranco, CommonCrawl, etc.).
-- **Resilient**: Handles DNS issues, timeouts, and robots.txt blocks intelligently.
-- **Hybrid Truth (WHOIS)**: Combines website data (Imprint) with official domain registration data (WHOIS) for 100% coverage.
+*   **SMB Discovery**: Uses targeted search dorks (e.g., `site:.de "Impressum" "GmbH"`) to find smaller companies.
+*   **AI-Powered Extraction**: Uses GLiNER (Generalist Lightweight NER) and strict heuristics to semantically understand legal pages.
+*   **High Data Quality**: New **DataValidator** ensures 100% schema compliance, filtering out navigation garbage and invalid names.
+*   **Unified Export**: Produces a clean, single-file CSV with 23 standard columns (Legal Name, CEO, Address, Robots Status, etc.).
+*   **Resilient**: Handles DNS issues, timeouts, and search engine blocking (via Common Crawl fallback).
+*   **Hybrid Truth (WHOIS)**: Combines website data (Imprint) with official domain registration data (WHOIS).
 
 ---
 
 ## Table of Contents
 
 - [Quick Start Guide](#quick-start-guide)
-- [New AI Features](#new-ai-features)
-- [Hybrid Truth (WHOIS Integration)](#hybrid-truth-whois-integration)
-- [End-to-End Testing](#end-to-end-testing)
-- [Step-by-Step Usage](#step-by-step-usage)
-- [Legal Data Extraction](#legal-data-extraction)
+- [SMB Discovery & Workflow](#smb-discovery--workflow)
+- [Data Quality & Validation](#data-quality--validation)
 - [Command Reference](#command-reference)
-- [Project Structure](#project-structure)
 - [Troubleshooting](#troubleshooting)
 
 ---
@@ -32,197 +28,131 @@
 ```bash
 pip install -r requirements.txt
 playwright install chromium
+python -m spacy download de_core_news_sm
 ```
-*(Note: First run will download the AI model ~500MB)*
 
-### 2. Basic Workflow
+### 2. Standard SMB Workflow (Recommended)
+This workflow is optimized for finding valid German/DACH companies.
+
 ```bash
-# 1. Discover & Crawl Automatically (Recommended)
-python main.py discover --tld .de --crawl --concurrency 10
+# Step 1: Discover SMBs (Targeted Search)
+# Filters out "Top 1M" giants to focus on smaller entities
+python main.py discover --company-size smb --limit 100 --tld de
 
-# 2. Manual Workflow
-# Step A: Discover domains
-python main.py discover --tld .de --limit 500
+# Step 2: Crawl with Enhanced Validation
+# Extracts data, checks robots.txt, and validates legal forms
+python main.py crawl --enhanced --concurrency 10
 
-# Step B: Crawl with AI
-python main.py crawl --enhanced --limit 100 --ignore-robots
-
-# 3. Export Data (Includes WHOIS + Website Data)
-python main.py export --legal-only --include-incomplete
+# Step 3: Export Unified Report
+# Generates a single, clean CSV matching the client schema
+python main.py export --unified
 ```
 
 ---
 
-## New AI Features
+## SMB Discovery & Workflow
 
-The crawler now uses a hybrid approach to solve common extraction problems:
+### Discovery Modes
+The crawler supports different strategies for finding domains:
 
-| Feature | Old Method (Regex) | **New Method (AI + GLiNER)** |
-| :--- | :--- | :--- |
-| **Company Name** | Often captured junk ("Adresse: ...") | **Accurate semantic extraction** |
-| **Address** | Confused by multi-line text | **Structured extraction** (Street, City, ZIP) |
-| **Context** | Blind pattern matching | **Understands "Managing Director" vs "Contact"** |
-| **DNS Handling** | Failed on root domains | **Smart Fallback** (tries `www.` automatically) |
+*   **SMB Mode** (`--company-size smb`):
+    *   Uses specific search dorks (`"Impressum" "GmbH"`, `"Handwerk"`, etc.) to find relevant legal pages directly.
+    *   **Automatic Fallback**: If search engines block requests, it automatically queries the Common Crawl index for the TLD.
+    *   *Best for: Finding local businesses, craftsmen, startups.*
 
----
+*   **Enterprise Mode** (`--company-size enterprise`):
+    *   Uses Tranco, Majestic, and Umbrella Top 1M lists.
+    *   *Best for: Analyzing popular/high-traffic sites.*
 
-## Hybrid Truth (WHOIS Integration)
-
-The system now implements a **"Hybrid Truth"** strategy. It captures data from two independent sources to ensure you get the full picture:
-
-1.  **Website Operator** (from `/impressum`): The company *operating* the site.
-2.  **Domain Registrant** (from WHOIS): The company *owning* the domain name.
-
-**Why is this important?**
-Often, a brand website (e.g., `peek-cloppenburg.at`) is operated by a local subsidiary (`Fashion ID GmbH`) but owned by a holding company (`JC New Retail AG`). Our export now shows **BOTH** side-by-side.
-
-**How it works:**
-- **Website Data**: Extracted via AI/Regex from the legal page.
-- **Registrant Data**: Fetched via the `whois` protocol directly from the registry.
-- **Smart Fill**: If the website is down or missing legal info, we fallback to WHOIS data to ensure *something* is always captured.
+### Unified Export Schema
+The `export --unified` command produces a strictly validated CSV with the following 23 columns:
+*   `company_name`, `legal_form`, `registration_number`
+*   `ceo_names`, `owner_organization`
+*   `industry`, `company_size`
+*   `emails`, `phone_numbers`, `fax_numbers`
+*   `street`, `postal_code`, `city`, `country`
+*   `service_product_description`
+*   `social_links`, `website_created_at`, `website_last_updated_at`
+*   `domain`, `crawled_at`, `run_id`
+*   `robots_allowed`, `robots_reason`
 
 ---
 
-## End-to-End Testing
+## Data Quality & Validation
 
-To verify the system is working correctly on your machine:
+We have implemented a strict **DataValidator** to ensure production-grade quality:
 
-### 1. Unit Test (Verify WHOIS Module)
-Check if the WHOIS enrichment is working standalone:
-```bash
-python test_whois.py
-```
-*Expected Output*: JSON data showing registrant info for `peek-cloppenburg.at`.
-
-### 2. Integration Test (Single Domain)
-Run a full crawl on a known tricky domain to prove DB storage works:
-```bash
-python main.py crawl --enhanced --limit 1 --tld .at
-```
-*(Note: This picks the next available .at domain. For a specific target, clear the queue first.)*
-
-### 3. Batch Test (10 Domains)
-Run a small batch to verify stability and export format:
-```bash
-# 1. Reset queue (optional)
-python main.py reset
-
-# 2. Run batch crawl
-python main.py crawl --enhanced --limit 10 --concurrency 5 --tld .at
-
-# 3. Export and check results
-python main.py export --legal-only --include-incomplete
-```
-*Check the generated CSV file in the `data/` folder. It should have columns for `legal_name` AND `registrant_name`.*
-
----
-
-## Step-by-Step Usage
-
-### Step 1: Automated Discovery & Crawling (New)
-The easiest way to start. Discovers domains and immediately starts crawling them.
-```bash
-python main.py discover --tld .de --crawl --concurrency 5
-```
-
-### Step 2: Manual Discovery (Optional)
-If you want to just populate the queue first.
-```bash
-python main.py discover --tld .de --limit 1000
-```
-
-### Step 3: Manual Crawling (Optional)
-Run the enhanced crawler on existing queued items.
-```bash
-python main.py crawl --enhanced --concurrency 10 --ignore-robots
-```
-* `--enhanced`: Activates Crawl4AI + GLiNER
-* `--ignore-robots`: Optional, bypasses blocking (use responsibly)
-
-### Step 3: Export Results
-Get your data in CSV format.
-```bash
-python main.py export --legal-only --include-incomplete
-```
-* `--legal-only`: Exports the structured legal entity table.
-* `--include-incomplete`: **Important!** Exports all found data, even if some fields (like Fax) are missing.
-
----
-
-## Legal Data Extraction
-
-The crawler targets these specific fields:
-
-| Field | Description | Example |
-| :--- | :--- | :--- |
-| **Legal Name** | Official company name | `TechSolutions GmbH` |
-| **Legal Form** | Entity type | `GmbH`, `AG`, `Ltd` |
-| **Register** | Commercial register ID | `HRB 12345` |
-| **Court** | Register court | `Amtsgericht Berlin` |
-| **Address** | Structured location | `Musterstr 1, 10115 Berlin` |
-| **Management** | CEO / Directors | `Dr. Max Mustermann` |
-| **Contact** | Email & Phone | `info@tech.de`, `+49 30...` |
+1.  **Garbage Rejection**:
+    *   Blocks navigation terms ("Home | About", "Warenkorb (0)", "Search...") from being saved as Company Names.
+    *   Rejects invalid addresses (e.g., missing City or Zip).
+2.  **Strict Heuristics**:
+    *   **CEO Names**: Must be a person entity, not a company or address. Filters out titles like "Geschäftsführer".
+    *   **Addresses**: Enforces German address formats (5-digit Zip).
+3.  **Robots Compliance**:
+    *   Explicitly checks `robots.txt` for every domain.
+    *   Records status (`True`/`False`) and reason in the export.
 
 ---
 
 ## Command Reference
 
-### Reset Queue
-Retry failed domains (useful after fixing network issues).
+### Discovery
 ```bash
+# Find 500 SMBs in Switzerland
+python main.py discover --company-size smb --limit 500 --tld ch
+
+# Find generic domains (mixed sources)
+python main.py discover --limit 1000 --tld de
+```
+
+### Crawling
+```bash
+# Run the enhanced crawler (Playwright + AI)
+python main.py crawl --enhanced --concurrency 10
+
+# Options:
+# --limit N          : Stop after N domains
+# --ignore-robots    : Bypass robots.txt (Use with caution)
+```
+
+### Export
+```bash
+# Recommended: Unified Format
+python main.py export --unified
+
+# Legacy Formats (if needed):
+python main.py export --legal-only    # Just legal entities table
+python main.py export --enhanced      # Raw enhanced results
+```
+
+### Maintenance
+```bash
+# Reset FAILED domains to PENDING (for retrying)
 python main.py reset
-```
 
-### Wipe Database (New)
-Start fresh by deleting all discovered domains and results. **Warning: Irreversible.**
-```bash
+# Wipe database completely (start fresh)
 python main.py reset-db
-```
 
-### Statistics
-View progress and success rates.
-```bash
+# View statistics
 python main.py stats
-```
-
-### Verification
-Run a test on sample data to verify the AI model.
-```bash
-python test_legal_extraction.py
-```
-
----
-
-## Configuration
-
-### Blacklist
-You can exclude specific domains or keywords by adding them to `config/blacklist.txt`. The crawler supports live reloading of this file, so you can add domains while the crawler is running.
-- **Exact Match**: Blocks exact domain names.
-- **Keyword Match**: Blocks any domain containing the keyword.
-
-Example `config/blacklist.txt`:
-```text
-google.com
-amazon.de
-example.com
 ```
 
 ---
 
 ## Troubleshooting
 
-**"DNS Failed" errors?**
-- We fixed a bug where domains without root A-records failed.
-- Run `python main.py reset` then crawl again.
+**"Discovery found 0 domains?"**
+- Search engines might be rate-limiting your IP.
+- **Fix**: The system now auto-falls back to Common Crawl. Just let it run.
 
-**"Blocked by robots.txt"?**
-- Use the `--ignore-robots` flag to bypass.
+**"Missing Legal Info?"**
+- Some sites use images for text or complex JS.
+- The `enhanced` crawler tries to render this, but it's not 100%.
+- Check `robots_allowed` column - we might be respecting a block.
 
-**Export file is empty or has few rows?**
-- **New Default:** The exporter now accumulates results from **ALL runs** by default.
-- Use `--include-incomplete` flag to see partial results.
-- Use `--run-id latest` if you ONLY want the most recent batch.
+**"Installation Error (SpaCy)?"**
+- Run `python -m spacy download de_core_news_sm` manually.
 
 ---
 
-*Developed by George*
+*Developed for Factory*

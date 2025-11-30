@@ -10,6 +10,7 @@ from langdetect import detect
 import phonenumbers
 from urllib.parse import urlparse
 from .utils import logger
+from .validator import DataValidator
 
 import trafilatura
 
@@ -23,6 +24,9 @@ except ImportError:
 
 class LegalExtractor:
     def __init__(self):
+        # Initialize Validator
+        self.validator = DataValidator()
+        
         # Initialize GLiNER model
         self.model = None
         if GLINER_AVAILABLE:
@@ -140,12 +144,6 @@ class LegalExtractor:
                    'administrador', 'forma jurídica']
         }
         
-        # DPO patterns
-        self.dpo_patterns = [
-            re.compile(r'(?:Data\s+Protection\s+Officer|DPO|Datenschutzbeauftragter)\s*[:.]?\s*([^,\n]+)', re.IGNORECASE),
-            re.compile(r'(?:Privacy\s+Officer|Délégué\s+à\s+la\s+protection)\s*[:.]?\s*([^,\n]+)', re.IGNORECASE)
-        ]
-        
         # Fax patterns
         self.fax_patterns = [
             re.compile(r'(?:Fax|Telefax|Télécopie)\s*[:.]?\s*([\+\d\s\-\(\)]+)', re.IGNORECASE)
@@ -223,14 +221,6 @@ class LegalExtractor:
                 elif reg_type == 'Companies House':
                     registration['registration_number'] = matches[0]
                     registration['register_type'] = 'Companies House'
-                elif reg_type == 'RCS':
-                    registration['registration_number'] = f"RCS {matches[0][0]} {matches[0][1]}"
-                    registration['register_type'] = 'RCS'
-                    registration['register_court'] = matches[0][0]
-                elif reg_type == 'SIRET':
-                    registration['siret'] = matches[0]
-                elif reg_type == 'SIREN':
-                    registration['siren'] = matches[0]
                 elif reg_type == 'EIN':
                     registration['tax_id'] = matches[0]
                     registration['register_type'] = 'IRS'
@@ -241,8 +231,7 @@ class LegalExtractor:
         """Extract information about company representatives."""
         representatives = {
             'ceo': None,
-            'directors': [],
-            'authorized_reps': []
+            'directors': []
         }
         
         lang = self.detect_language(text)
@@ -258,29 +247,16 @@ class LegalExtractor:
                     for match in matches:
                         names = re.split(r'[,;]|\s+und\s+|\s+and\s+|\s+et\s+', match)
                         for name in names:
-                            name = name.strip()
-                            if name and len(name) > 3 and not any(char.isdigit() for char in name):
+                            # Use Validator
+                            validated_name = self.validator.validate_ceo_name(name)
+                            if validated_name:
                                 if not representatives['ceo']:
-                                    representatives['ceo'] = name
+                                    representatives['ceo'] = validated_name
                                 else:
-                                    representatives['directors'].append(name)
+                                    representatives['directors'].append(validated_name)
                                     
-        # Extract authorized representatives
-        if lang_key in self.multilang_patterns['authorized_rep']:
-            for pattern_str in self.multilang_patterns['authorized_rep'][lang_key]:
-                pattern = re.compile(pattern_str, re.IGNORECASE | re.MULTILINE)
-                matches = pattern.findall(text)
-                if matches:
-                    for match in matches:
-                        names = re.split(r'[,;]|\s+und\s+|\s+and\s+|\s+et\s+', match)
-                        for name in names:
-                            name = name.strip()
-                            if name and len(name) > 3 and not any(char.isdigit() for char in name):
-                                representatives['authorized_reps'].append(name)
-                                
         # Remove duplicates
         representatives['directors'] = list(set(representatives['directors']))
-        representatives['authorized_reps'] = list(set(representatives['authorized_reps']))
         
         return representatives
 
@@ -331,7 +307,9 @@ class LegalExtractor:
             for pattern in patterns:
                 match = pattern.search(text)
                 if match:
-                    addresses['registered'] = self.parse_address(match.group(1))
+                    parsed = self.parse_address(match.group(1))
+                    if self.validator.validate_address(parsed.get('street'), parsed.get('zip'), parsed.get('city')):
+                        addresses['registered'] = parsed
                     break
         
         # NEW: Direct German address pattern extraction
@@ -493,25 +471,9 @@ class LegalExtractor:
         contacts = {
             'legal_email': None,
             'legal_phone': None,
-            'fax': None,
-            'dpo_email': None,
-            'dpo_name': None
+            'fax': None
         }
         
-        # Extract DPO information
-        for pattern in self.dpo_patterns:
-            match = pattern.search(text)
-            if match:
-                dpo_info = match.group(1).strip()
-                # Check if it contains an email
-                email_pattern = re.compile(r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}')
-                email_match = email_pattern.search(dpo_info)
-                if email_match:
-                    contacts['dpo_email'] = email_match.group(0)
-                    contacts['dpo_name'] = dpo_info.replace(email_match.group(0), '').strip(' ,')
-                else:
-                    contacts['dpo_name'] = dpo_info
-                    
         # Extract fax number
         for pattern in self.fax_patterns:
             match = pattern.search(text)
@@ -647,7 +609,8 @@ class LegalExtractor:
             for tag in soup(['script', 'style', 'noscript']):
                 tag.decompose()
                 
-            text = soup.get_text(separator=' ', strip=True)
+            # Use newline separator to preserve structure for regexes
+            text = soup.get_text(separator='\n', strip=True)
             
             # Use trafilatura for main content extraction (cleaner text for AI)
             main_content = trafilatura.extract(html, include_comments=False, include_tables=False)
@@ -856,11 +819,15 @@ class LegalExtractor:
         cleaned = cleaned.strip(" \t\n\r:.,;-")
         
         # Check if it looks like a real name
-        if len(cleaned) < 3:
+        if not self.validator.validate_legal_name(cleaned):
             return None
             
         # If it's just a legal form (e.g. "GmbH"), it's junk
         if cleaned.lower() in [f.lower() for forms in self.legal_forms.values() for f in forms]:
+            return None
+            
+        # Final Length Check after cleaning
+        if len(cleaned) > 100: # Way too long for a company name
             return None
             
         return cleaned
@@ -868,6 +835,9 @@ class LegalExtractor:
     def extract_legal_name(self, text: str, legal_form: Optional[str] = None) -> Optional[str]:
         """Extract the official legal name of the company."""
         candidates = []
+        
+        # Standard headers are risky (often contain 'Impressum' followed by 'Angaben gemäß...')
+        # Instead, look specifically for "Name GmbH" structures near the top of sections
         
         patterns = [
             # German patterns
@@ -904,10 +874,14 @@ class LegalExtractor:
             for match in matches:
                 # Use aggressive cleaning for regex
                 cleaned = self.clean_legal_name(match, aggressive=True)
+                # Validator check is done inside clean_legal_name now
                 if cleaned and len(cleaned) > 5:
-                    candidates.append((cleaned, 5))
+                    # Give HUGE bonus if found with legal form suffix
+                    candidates.append((cleaned, 20)) 
 
         if candidates:
+            # Filter out candidates that are just common words if better options exist
+            # Sort by priority
             candidates.sort(key=lambda x: x[1], reverse=True)
             return candidates[0][0]
             

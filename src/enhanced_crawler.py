@@ -8,6 +8,7 @@ import random
 from pathlib import Path
 from typing import Dict, List, Optional
 from urllib.parse import urljoin, urlparse
+import urllib.robotparser
 import httpx
 
 # Try importing Crawl4AI
@@ -115,6 +116,36 @@ class EnhancedCrawler:
             self.session_stats['failed'] += 1
             return
             
+        # 1.5 Robots.txt check (Explicit Tracking)
+        robots_status = "UNKNOWN"
+        robots_reason = ""
+        try:
+            rp = urllib.robotparser.RobotFileParser()
+            # Fetch robots.txt content asynchronously
+            robots_url = f"http://{domain}/robots.txt"
+            async with httpx.AsyncClient(timeout=5, follow_redirects=True) as client:
+                r = await client.get(robots_url, headers={'User-Agent': USER_AGENT})
+                if r.status_code == 200:
+                    rp.parse(r.text.splitlines())
+                    is_allowed = rp.can_fetch(USER_AGENT, f"http://{domain}/")
+                    robots_status = "ALLOWED" if is_allowed else "DISALLOWED"
+                    robots_reason = "Allowed by robots.txt" if is_allowed else "Disallowed by robots.txt"
+                else:
+                    robots_status = "ALLOWED" # Default allow if 404/etc
+                    robots_reason = f"No robots.txt found (HTTP {r.status_code})"
+        except Exception as e:
+            robots_status = "ERROR"
+            robots_reason = f"Error checking robots.txt: {str(e)[:50]}"
+
+        # Update DB with robots status (fire and forget, don't block long)
+        try:
+            async with aiosqlite.connect(DB_PATH) as db:
+                await db.execute("UPDATE queue SET robots_status = ?, robots_reason = ? WHERE id = ?", 
+                                 (robots_status, robots_reason, domain_id))
+                await db.commit()
+        except Exception as e:
+            logger.error(f"Failed to update robots status for {domain}: {e}")
+
         await update_domain_status(domain_id, "PROCESSING")
         
         # 2. DNS check (Soft Check)

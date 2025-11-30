@@ -157,6 +157,13 @@ async def init_db():
                 await db.execute(f"ALTER TABLE legal_entities ADD COLUMN {col} TEXT")
             except Exception:
                 pass
+                
+        # Add robots tracking columns to queue (migration)
+        try:
+            await db.execute("ALTER TABLE queue ADD COLUMN robots_status TEXT")
+            await db.execute("ALTER TABLE queue ADD COLUMN robots_reason TEXT")
+        except Exception:
+            pass
         
         # Index for faster queue lookup
         await db.execute("CREATE INDEX IF NOT EXISTS idx_queue_status ON queue(status)")

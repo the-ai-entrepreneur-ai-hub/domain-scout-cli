@@ -558,23 +558,134 @@ async def ingest_bing_search(tld: str, limit: int = 50):
         logger.error(f"Bing search error: {e}")
 
 
-async def run_discovery(tld: str, limit: int = 100):
-    """Main discovery task - aggregates domains from multiple sources."""
-    logger.info(f"=== Starting discovery for TLD: {tld or 'ANY'}, limit: {limit} ===")
+async def ingest_targeted_search(tld: str, limit: int = 100):
+    """
+    Targeted SMB discovery using specific legal page dorks.
+    Finds companies that might not be in top lists but have legal requirements.
+    """
+    suffix = tld.lstrip(".") if tld and tld not in (None, "", "*", "all", "any") else "de"
+    
+    # Dorks to find legal pages directly
+    dorks = [
+        f'site:.{suffix} "Impressum" "GmbH" -site:facebook.com -site:youtube.com -site:linkedin.com',
+        f'site:.{suffix} "Kontakt" "Geschäftsführer" -site:facebook.com',
+        f'site:.{suffix} "Rechtliche Hinweise" "HRB" -site:amazon.{suffix}',
+        f'site:.{suffix} "Impressum" "Handwerk" -site:wikipedia.org',
+        f'site:.{suffix} "Impressum" "Einzelunternehmen"',
+    ]
+    
+    logger.info(f"Running targeted SMB search for TLD: {suffix} (limit={limit})")
 
-    # Primary sources (bulk domain lists)
-    await ingest_tranco_domains(tld, limit)
-    await ingest_majestic_domains(tld, limit)
-    await ingest_umbrella_domains(tld, limit)
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36"
+    }
 
-    # Secondary sources (APIs)
-    await ingest_common_crawl_domains(tld, limit // 2)
-    await ingest_crtsh_domains(tld, limit // 2)
-    await ingest_wayback_domains(tld, limit // 2)
+    total_found = 0
+    
+    # Global Giant Blacklist (Skip these if found in search)
+    # These are huge platforms that clutter results and aren't the SMBs we want
+    GIANT_BLACKLIST = {
+        "facebook.com", "linkedin.com", "youtube.com", "twitter.com", "instagram.com",
+        "amazon.com", "amazon.de", "ebay.com", "ebay.de", "wikipedia.org",
+        "yelp.com", "tripadvisor.com", "xing.com", "kununu.com"
+    }
 
-    # Tertiary sources (search engines)
-    search_limit = min(50, max(10, limit // 2))
-    await ingest_search_engine_domains(tld, search_limit)
-    await ingest_bing_search(tld, search_limit)
+    async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
+        for dork in dorks:
+            if total_found >= limit:
+                break
+                
+            try:
+                # Using DuckDuckGo HTML (Lite) version to avoid JS requirements
+                resp = await client.get(
+                    "https://duckduckgo.com/html/", 
+                    params={"q": dork, "kl": f"de-de" if suffix == "de" else "us-en"}, 
+                    headers=headers
+                )
+                
+                if resp.status_code >= 400:
+                    logger.warning(f"Targeted search status {resp.status_code} for dork: {dork}")
+                    continue
+
+                soup = BeautifulSoup(resp.text, "lxml")
+                batch = []
+                
+                for anchor in soup.select("a.result__a"):
+                    href = anchor.get("href")
+                    if not href:
+                        continue
+
+                    # Decode DDG redirect url
+                    parsed = urlparse(href)
+                    if parsed.netloc == "duckduckgo.com" and parsed.path == "/l/":
+                        params = parse_qs(parsed.query)
+                        target = params.get("uddg", [None])[0]
+                        if target:
+                            href = unquote(target)
+                            parsed = urlparse(href)
+
+                    domain = parsed.netloc.split(":")[0].lower()
+                    if not domain or should_skip_domain(domain):
+                        continue
+                    
+                    # Check giant blacklist
+                    root_domain = ".".join(domain.split(".")[-2:])
+                    if domain in GIANT_BLACKLIST or root_domain in GIANT_BLACKLIST:
+                        continue
+                        
+                    if suffix and not domain.endswith(f".{suffix}"):
+                        continue
+
+                    batch.append((domain, "TARGETED_SEARCH"))
+                    total_found += 1
+                    
+                if batch:
+                    await insert_domains(batch)
+                    logger.info(f"Found {len(batch)} domains with dork: {dork}")
+                    
+                # Be nice to the search engine
+                await asyncio.sleep(2)
+
+            except Exception as e:
+                logger.error(f"Targeted search error for {dork}: {e}")
+
+async def run_discovery(tld: str, limit: int = 100, company_size: str = "all"):
+    """
+    Main discovery task - aggregates domains from multiple sources.
+    Modes:
+    - all: Balanced mix (default)
+    - smb: Prioritize search engines and ignore Top 1M lists
+    - enterprise: Prioritize Top 1M lists
+    """
+    logger.info(f"=== Starting discovery for TLD: {tld or 'ANY'}, limit: {limit}, size: {company_size} ===")
+
+    if company_size == "smb":
+        # 1. Targeted Search (High Priority for SMB)
+        await ingest_targeted_search(tld, limit)
+        
+        # 2. Search Engine Fallbacks
+        search_limit = limit
+        await ingest_search_engine_domains(tld, search_limit)
+        await ingest_bing_search(tld, search_limit)
+        
+        # 3. Common Crawl Fallback (Critical for when search engines block)
+        await ingest_common_crawl_domains(tld, limit=min(limit, 50))
+        
+        # 4. Skip Top 1M lists for SMB mode
+        logger.info("Skipping Top 1M lists for SMB mode")
+        
+    elif company_size == "enterprise":
+        # Prioritize lists
+        await ingest_tranco_domains(tld, limit)
+        await ingest_majestic_domains(tld, limit)
+        await ingest_umbrella_domains(tld, limit)
+        
+    else:
+        # Default Balanced Mode
+        await ingest_targeted_search(tld, limit // 3)
+        await ingest_tranco_domains(tld, limit)
+        await ingest_majestic_domains(tld, limit)
+        await ingest_common_crawl_domains(tld, limit // 2)
+        await ingest_search_engine_domains(tld, 50)
 
     logger.info("=== Discovery complete ===")
