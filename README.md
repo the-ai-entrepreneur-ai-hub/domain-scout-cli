@@ -84,26 +84,26 @@ The system is designed as a modular pipeline. Here is how data flows from the CL
 
 ```mermaid
 graph TD
-    CLI[CLI (main.py)] -->|1. Discover| Discovery[Discovery Module]
+    CLI["CLI (main.py)"] -->|1. Discover| Discovery["Discovery Module"]
     CLI -->|2. Crawl| Crawler{EnhancedCrawler}
-    CLI -->|3. Export| Exporter[UnifiedExporter]
+    CLI -->|3. Export| Exporter["UnifiedExporter"]
 
     subgraph "Phase 1: Discovery"
-        Discovery -->|Fetch| Dorks[Search Dorks / CommonCrawl]
-        Dorks -->|Store| Queue[(Database Queue)]
+        Discovery -->|Fetch| Dorks["Search Dorks / CommonCrawl"]
+        Dorks -->|Store| Queue[("Database Queue")]
     end
 
     subgraph "Phase 2: Crawling & Extraction"
         Crawler -->|Read| Queue
-        Crawler -->|Render| Playwright[Playwright / Crawl4AI]
-        Playwright -->|HTML| Extractor[EnhancedExtractor / LegalExtractor]
-        Extractor -->|Raw Data| Validator[DataValidator]
-        Validator -->|Valid Data| DB[(Database Results)]
+        Crawler -->|Render| Playwright["Playwright / Crawl4AI"]
+        Playwright -->|HTML| Extractor["EnhancedExtractor / LegalExtractor"]
+        Extractor -->|Raw Data| Validator["DataValidator"]
+        Validator -->|Valid Data| DB[("Database Results")]
     end
 
     subgraph "Phase 3: Export"
         Exporter -->|Query| DB
-        Exporter -->|Format| CSV[Unified CSV]
+        Exporter -->|Format| CSV["Unified CSV"]
     end
 ```
 
