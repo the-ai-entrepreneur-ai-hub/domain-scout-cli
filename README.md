@@ -155,4 +155,4 @@ python main.py stats
 
 ---
 
-*Developed for Factory*
+*Developed by George*
