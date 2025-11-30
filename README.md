@@ -78,6 +78,47 @@ The `export --unified` command produces a strictly validated CSV with the follow
 
 ---
 
+## Architecture & Execution Flow
+
+The system is designed as a modular pipeline. Here is how data flows from the CLI to the final CSV export:
+
+```mermaid
+graph TD
+    CLI[CLI (main.py)] -->|1. Discover| Discovery[Discovery Module]
+    CLI -->|2. Crawl| Crawler{EnhancedCrawler}
+    CLI -->|3. Export| Exporter[UnifiedExporter]
+
+    subgraph "Phase 1: Discovery"
+        Discovery -->|Fetch| Dorks[Search Dorks / CommonCrawl]
+        Dorks -->|Store| Queue[(Database Queue)]
+    end
+
+    subgraph "Phase 2: Crawling & Extraction"
+        Crawler -->|Read| Queue
+        Crawler -->|Render| Playwright[Playwright / Crawl4AI]
+        Playwright -->|HTML| Extractor[EnhancedExtractor / LegalExtractor]
+        Extractor -->|Raw Data| Validator[DataValidator]
+        Validator -->|Valid Data| DB[(Database Results)]
+    end
+
+    subgraph "Phase 3: Export"
+        Exporter -->|Query| DB
+        Exporter -->|Format| CSV[Unified CSV]
+    end
+```
+
+### Core Components
+
+*   **`main.py`**: The entry point handling CLI arguments and orchestration.
+*   **`src/discovery.py`**: Manages domain finding strategies (Targeted Search, Common Crawl, etc.).
+*   **`src/enhanced_crawler.py`**: The main engine that manages concurrent workers, Playwright instances, and robots.txt compliance.
+*   **`src/enhanced_extractor.py`**: Extracts structured data (emails, phones, addresses) using regex and heuristics.
+*   **`src/legal_extractor.py`**: Specialized logic for parsing German Impressum/Legal pages.
+*   **`src/validator.py`**: Enforces strict data quality rules (garbage filtering, address validation).
+*   **`src/enhanced_storage.py`**: Handles data persistence and generating the Unified Export.
+
+---
+
 ## Data Quality & Validation
 
 We have implemented a strict **DataValidator** to ensure production-grade quality:
