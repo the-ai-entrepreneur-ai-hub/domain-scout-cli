@@ -83,7 +83,19 @@ OLLAMA_URL = os.getenv('OLLAMA_URL')
 
 # Output settings
 FEED_EXPORT_ENCODING = 'utf-8'
-LOG_LEVEL = os.getenv('LOG_LEVEL', 'INFO')
+LOG_LEVEL = os.getenv('LOG_LEVEL', 'ERROR')  # Reduced noise - only show errors
+
+# Suppress repetitive warnings
+LOG_SHORT_NAMES = True
+
+# Extensions - add stats summary
+EXTENSIONS = {
+    'scrapy.extensions.corestats.CoreStats': 100,
+    'scrapy.extensions.memusage.MemoryUsage': 200,
+    'scrapy.extensions.logstats.LogStats': None,  # Disable periodic stats (noisy)
+    'scrapy.extensions.telnet.TelnetConsole': None,  # Disable telnet
+    'legal_crawler.stats_extension.StatsExtension': 500,  # Our colored summary
+}
 
 # Request fingerprinting
 REQUEST_FINGERPRINTER_IMPLEMENTATION = '2.7'

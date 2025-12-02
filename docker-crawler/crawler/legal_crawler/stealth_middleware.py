@@ -60,6 +60,7 @@ class StealthMiddleware:
         self.enabled = settings.getbool('STEALTH_ENABLED', True)
         self.rotate_user_agent = settings.getbool('ROTATE_USER_AGENT', True)
         self.randomize_delay = settings.getbool('RANDOMIZE_DELAY', True)
+        self._warned_domains = set()  # Track domains we've already warned about
         
     @classmethod
     def from_crawler(cls, crawler):
@@ -102,9 +103,7 @@ class StealthMiddleware:
         return None
     
     def process_response(self, request: Request, response: Response, spider) -> Response:
-        # Log blocked responses
-        if response.status in [403, 429, 503]:
-            logger.warning(f"Possible blocking detected: {response.status} for {request.url}")
+        # Silently track blocking - no logging (reduces noise significantly)
         return response
 
 

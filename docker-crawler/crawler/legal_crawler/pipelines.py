@@ -355,10 +355,13 @@ class CsvPipeline:
     def __init__(self):
         self.file = None
         self.writer = None
+        self.output_path = None
     
     def open_spider(self, spider):
-        output_path = os.path.join('/app/data', 'results.csv')
-        self.file = open(output_path, 'w', newline='', encoding='utf-8')
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        filename = f'legal_notices_{timestamp}.csv'
+        self.output_path = os.path.join('/app/data', filename)
+        self.file = open(self.output_path, 'w', newline='', encoding='utf-8')
         self.writer = csv.writer(self.file)
         self.writer.writerow([
             'domain', 'url', 'company_name', 'legal_form', 'street', 'postal_code',
@@ -366,6 +369,7 @@ class CsvPipeline:
             'registration_number', 'vat_id', 'crawled_at',
             'whois_registrar', 'whois_creation_date', 'whois_expiration_date', 'whois_owner', 'whois_emails'
         ])
+        print(f"\033[96m[*] Output file: {self.output_path}\033[0m")
     
     def close_spider(self, spider):
         if self.file: self.file.close()

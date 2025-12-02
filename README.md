@@ -1,66 +1,143 @@
-# SMB Web Crawler v2.1 (Docker & Hybrid AI)
+# SMB Web Crawler v2.2 (Docker + Auto-Discovery)
 
-**Welcome!** This is an advanced web scraping tool designed to extract legal and business information (Impressum) from DACH region websites (Germany, Austria, Switzerland).
-
-**Current Version (v2.1)**:
--   **Architecture**: Docker-based (Scrapy + Playwright + Redis + Postgres).
--   **Strategy**: "Anchor & Expand" Hybrid Extraction (NLP + Structure).
--   **Resilience**: Anti-blocking (Proxies, User-Agents) + Wayback Machine Fallback.
-
----
-
-## 🚀 Quick Start (Docker)
-
-The project now runs primarily in **Docker** for stability and reproducibility.
-
-### 1. Setup
-```bash
-cd docker-crawler
-docker-compose build crawler
-docker-compose up -d redis postgres
-```
-
-### 2. Run the Crawler
-```bash
-# Crawl a list of domains (from domains_full.txt)
-docker-compose run --rm crawler scrapy crawl robust -a domains_file=/app/domains_full.txt
-```
-
-**Results** are saved automatically to `docker-crawler/data/results.csv`.
-
-👉 **[Read the Full Setup Guide](docs/DOCKER_SETUP.md)**
-
----
-
-## 🧠 How It Works (Architecture V2)
-
-We have replaced simple Regex matching with a **Hybrid NLP Strategy**:
-
-1.  **Render**: Playwright renders the page (bypassing JS checks).
-2.  **Clean**: `Trafilatura` extracts only the main text content.
-3.  **Anchor**: We locate the **Zip Code & City** (High confidence anchor).
-4.  **Expand**: We analyze the lines *around* the anchor to find the **Company Name** and **Street** using `SpaCy` (AI) and Fuzzy Matching.
-
-👉 **[Read the Architecture Deep Dive](docs/ARCHITECTURE_V2.md)**
-
----
+Advanced web scraping tool for extracting legal/business information (Impressum) from DACH region websites.
 
 ## Features
 
-*   **Multi-Layer Resilience**:
-    *   Direct Request -> Proxy Rotation -> Wayback Machine.
-*   **Data Quality**:
-    *   Validated against 50+ real-world test cases.
-    *   Garbage filtering (removes "Postfach", navigation text).
-    *   International Phone Number standardization.
-*   **Unified Export**:
-    *   Clean CSV output ready for client use.
+- **Automatic Discovery**: Find domains via Certificate Transparency logs & search engines
+- **Hybrid Extraction**: NLP + Structural analysis for high accuracy
+- **Anti-Blocking**: Proxy rotation, stealth headers, Playwright rendering
+- **Clean Output**: Colored progress, summary stats, CSV/PostgreSQL export
 
 ---
 
-## Legacy (Python Script)
-*The old `main.py` method is still available in the `src/` folder but is deprecated in favor of the Dockerized Robust Spider.*
+## Quick Start
+
+```bash
+cd docker-crawler
+
+# 1. Build
+docker-compose build crawler
+docker-compose up -d redis postgres ollama
+
+# 2. Discover domains (automatic)
+docker-compose run --rm crawler python discovery.py --tld de --limit 500
+
+# 3. Crawl
+docker-compose run --rm crawler scrapy crawl robust -a domains_file=/app/domains_full.txt
+
+# 4. Export results (timestamped files)
+ls data/legal_notices_*.csv
+```
 
 ---
 
-*Developed for High-Accuracy Legal Data Extraction*
+## Commands Reference
+
+### Discovery
+```bash
+# German domains
+docker-compose run --rm crawler python discovery.py --tld de --limit 1000
+
+# Swiss domains
+docker-compose run --rm crawler python discovery.py --tld ch --limit 500
+
+# Austrian domains
+docker-compose run --rm crawler python discovery.py --tld at --limit 500
+```
+
+### Crawling
+```bash
+# From file
+docker-compose run --rm crawler scrapy crawl robust -a domains_file=/app/domains_full.txt
+
+# Specific domains
+docker-compose run --rm crawler scrapy crawl robust -a domains="bmw.de,siemens.com"
+```
+
+### Export
+```bash
+# Export clean records only (filters garbage)
+docker-compose run --rm crawler python export_clean.py
+# Output: data/clean_leads_YYYYMMDD_HHMMSS.csv
+
+# List all exports
+dir docker-crawler/data/*.csv          # Windows
+ls docker-crawler/data/*.csv           # Linux/Mac
+
+# PostgreSQL export
+docker-compose exec postgres psql -U crawler -d crawler -c \
+  "\COPY legal_notices TO '/tmp/export.csv' CSV HEADER"
+docker cp $(docker-compose ps -q postgres):/tmp/export.csv ./export.csv
+
+# Query database
+docker-compose exec postgres psql -U crawler -d crawler -c \
+  "SELECT domain, company_name, city FROM legal_notices LIMIT 10"
+```
+
+---
+
+## Output Fields
+
+| Field | Example |
+|-------|---------|
+| `domain` | `example.de` |
+| `company_name` | `Example GmbH` |
+| `street` | `Musterstraße 123` |
+| `postal_code` | `12345` |
+| `city` | `Berlin` |
+| `phone` | `+49 30 12345678` |
+| `email` | `info@example.de` |
+| `legal_form` | `GmbH` |
+| `register_number` | `HRB 12345` |
+| `vat_id` | `DE123456789` |
+| `ceo` | `Max Mustermann` |
+
+---
+
+## Sample Output
+
+```
+=== Domain Discovery Tool ===
+[*] Querying crt.sh for *.de...
+[+] crt.sh found 500 domains
+[+] Added 500 new domains to /app/domains_full.txt
+
+============================================================
+           CRAWL SUMMARY
+============================================================
+Duration: 0h 45m 12s
+--- Domains ---
+  Total domains:    500
+  Successful:       320
+  Failed:           180
+  Success rate:     64.0%
+--- Items Extracted ---
+  Total items:      320
+============================================================
+```
+
+---
+
+## Documentation
+
+- [Docker Setup Guide](docs/DOCKER_SETUP.md) - Complete installation & usage
+- [Architecture V2](docs/ARCHITECTURE_V2.md) - How the extraction works
+- [Data Model](docs/DATA_MODEL.md) - Database schema
+
+---
+
+## Troubleshooting
+
+| Issue | Solution |
+|-------|----------|
+| No domains loaded | Run `discovery.py` first |
+| DATABASE_URL not set | Create `.env` file in docker-crawler/ |
+| High 403 errors | Reduce `CONCURRENT_REQUESTS` in settings.py |
+| Slow crawling | Increase `CONCURRENT_REQUESTS` (if not blocked) |
+
+---
+
+## License
+
+MIT License

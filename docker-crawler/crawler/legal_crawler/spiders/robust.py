@@ -7,10 +7,12 @@ Features:
 4. Redis job queue integration
 5. LLM fallback extraction
 6. Resilient error handling
+7. Minimal logging (cleaner output)
 """
 
 import re
 import os
+import sys
 import scrapy
 import logging
 from urllib.parse import urljoin, urlparse
@@ -18,7 +20,17 @@ from typing import Optional, Dict, List
 from scrapy import signals
 from legal_crawler.items import LegalNoticeItem
 
+# Minimal logging
 logger = logging.getLogger(__name__)
+logger.setLevel(logging.ERROR)  # Only show errors
+
+# ANSI Colors for progress
+class Colors:
+    GREEN = '\033[92m'
+    YELLOW = '\033[93m'
+    RED = '\033[91m'
+    CYAN = '\033[96m'
+    END = '\033[0m'
 
 
 class RobustSpider(scrapy.Spider):
@@ -68,6 +80,7 @@ class RobustSpider(scrapy.Spider):
         self.job_queue = None
         self.llm_extractor = None
         self.stats = {'success': 0, 'failed': 0, 'total': 0}
+        self._progress_shown = False
         
         # Load domains
         if domains_file and os.path.exists(domains_file):
@@ -76,7 +89,8 @@ class RobustSpider(scrapy.Spider):
         elif domains:
             self.domains_to_crawl = [d.strip() for d in domains.split(',')]
         
-        logger.info(f"RobustSpider initialized with {len(self.domains_to_crawl)} domains")
+        # Show startup info
+        print(f"{Colors.CYAN}[*] Loaded {len(self.domains_to_crawl)} domains{Colors.END}")
     
     @classmethod
     def from_crawler(cls, crawler, *args, **kwargs):
@@ -93,23 +107,28 @@ class RobustSpider(scrapy.Spider):
                 from legal_crawler.job_queue import get_job_queue
                 self.job_queue = get_job_queue()
                 self.job_queue.add_domains(self.domains_to_crawl)
-                logger.info("Redis job queue initialized")
-            except Exception as e:
-                logger.warning(f"Job queue init failed: {e}")
+            except Exception:
+                pass
         
-        # Initialize LLM extractor
+        # Initialize LLM extractor (silently)
         try:
             from legal_crawler.llm_extractor import get_llm_extractor
             self.llm_extractor = get_llm_extractor()
-        except Exception as e:
-            logger.warning(f"LLM extractor init failed: {e}")
+        except Exception:
+            pass
     
     def spider_closed(self, spider):
-        """Log stats when spider closes"""
-        logger.info(f"Spider closed. Stats: {self.stats}")
-        if self.job_queue:
-            stats = self.job_queue.get_stats()
-            logger.info(f"Queue stats: {stats}")
+        """Stats are handled by StatsExtension - no logging needed here"""
+        pass
+    
+    def _show_progress(self):
+        """Show inline progress update"""
+        processed = self.stats['success'] + self.stats['failed']
+        total = self.stats['total']
+        if total > 0:
+            pct = processed / total * 100
+            sys.stdout.write(f"\r{Colors.CYAN}[*] Progress: {processed}/{total} ({pct:.0f}%) | {Colors.GREEN}Success: {self.stats['success']}{Colors.END} | {Colors.RED}Failed: {self.stats['failed']}{Colors.END}   ")
+            sys.stdout.flush()
     
     def start_requests(self):
         """Generate initial requests"""
@@ -174,9 +193,7 @@ class RobustSpider(scrapy.Spider):
         attempts = request.meta.get('attempts', 0) + 1
         job = request.meta.get('job')
         
-        logger.warning(f"Request failed for {domain}: {failure.getErrorMessage()}")
-        
-        # Try alternative paths
+        # Try alternative paths (silently)
         if attempts < len(self.IMPRESSUM_PATHS):
             alt_path = self.IMPRESSUM_PATHS[attempts]
             url = f'https://{domain}{alt_path}'
@@ -244,7 +261,7 @@ class RobustSpider(scrapy.Spider):
         job = request.meta.get('job')
         
         self.stats['failed'] += 1
-        logger.error(f"All attempts failed for {domain}")
+        self._show_progress()  # Update progress line
         
         if self.job_queue and job:
             self.job_queue.fail_job(job, str(failure.getErrorMessage()), retry=False)
@@ -282,6 +299,7 @@ class RobustSpider(scrapy.Spider):
         else:
             # No impressum link found
             self.stats['failed'] += 1
+            self._show_progress()  # Update progress line
             if self.job_queue and job:
                 self.job_queue.fail_job(job, "No Impressum link found", retry=True)
     
@@ -295,7 +313,6 @@ class RobustSpider(scrapy.Spider):
         score = self._score_impressum_page(response.url, page_text)
         
         if score < 3:
-            logger.debug(f"Low score ({score}) for {response.url}, trying alternatives")
             return
         
         # Extract text
@@ -309,6 +326,7 @@ class RobustSpider(scrapy.Spider):
         item['extracted_text'] = text[:20000]
         
         self.stats['success'] += 1
+        self._show_progress()  # Update progress line
         
         # Mark job as completed
         if self.job_queue and job:

@@ -1,90 +1,282 @@
 # Docker Crawler Setup & Usage Guide
 
-This project has been migrated to a robust Docker-based architecture to ensure consistency, scalability, and reliability.
+Complete guide for the Docker-based legal notice crawler with automatic discovery and export.
 
 ## Prerequisites
 
-- **Docker** and **Docker Compose** installed on your machine.
-- A valid internet connection (for fetching proxies and crawling).
+- **Docker** and **Docker Compose** installed
+- Internet connection for crawling
 
 ## Directory Structure
 
-The Docker setup is located in `D:\docker-crawler` (or the root `docker-crawler` folder).
-
 ```
 docker-crawler/
-├── crawler/                 # Scrapy project source
-│   ├── legal_crawler/       # Spider & Pipelines
-│   │   ├── spiders/robust.py # The main Production Spider
-│   │   ├── pipelines.py     # Hybrid Extraction Logic
-│   │   ├── settings.py      # Config (Proxies, Timeouts)
-│   │   └── ...
-│   ├── Dockerfile           # Python environment definition
-│   └── requirements.txt     # Dependencies (Trafilatura, SpaCy, etc.)
-├── data/                    # Shared volume for CSV results
-├── docker-compose.yml       # Service orchestration
-└── domains_full.txt         # Input list of domains
+├── crawler/                    # Scrapy project
+│   ├── discovery.py            # Auto-discovery tool
+│   ├── legal_crawler/
+│   │   ├── spiders/robust.py   # Production spider
+│   │   ├── pipelines.py        # Hybrid extraction
+│   │   ├── stats_extension.py  # Colored summary
+│   │   └── settings.py         # Configuration
+│   ├── Dockerfile
+│   └── requirements.txt
+├── data/                       # Output folder (CSV)
+├── docker-compose.yml
+├── domains_full.txt            # Domain list (auto-populated)
+└── .env                        # Environment variables
 ```
 
-## Services
+---
 
-The stack consists of 4 services:
-1.  **Crawler**: The core Scrapy container (Python 3.11, Playwright, SpaCy).
-2.  **Redis**: Manages the job queue and crawl state.
-3.  **Postgres**: Stores structured results (SQL).
-4.  **Ollama**: (Optional) Local LLM service for advanced extraction (disabled by default for memory).
+## Complete Workflow
 
-## Quick Start
+### Step 1: Build & Start
 
-### 1. Build the Environment
-Before the first run (or after changing code/requirements), build the images:
 ```bash
 cd docker-crawler
+
+# Build the crawler image
 docker-compose build crawler
+
+# Start background services
+docker-compose up -d redis postgres ollama
 ```
 
-### 2. Start Infrastructure
-Start the background services (Database & Redis):
+### Step 2: Discover Domains (Automatic)
+
+Use the discovery tool to find business domains automatically:
+
 ```bash
-docker-compose up -d redis postgres
+# Find 500 German domains
+docker-compose run --rm crawler python discovery.py --tld de --limit 500
+
+# Find 1000 Swiss domains  
+docker-compose run --rm crawler python discovery.py --tld ch --limit 1000
+
+# Find Austrian domains
+docker-compose run --rm crawler python discovery.py --tld at --limit 500
 ```
 
-### 3. Run the Crawler
-To run the crawler against a list of domains:
+**Output:**
+```
+=== Domain Discovery Tool ===
+Target TLD: .de
+Limit: 500
+
+[*] Querying crt.sh for *.de...
+[+] crt.sh found 500 domains
+[+] Added 500 new domains to /app/domains_full.txt
+```
+
+### Step 3: Run Crawler
 
 ```bash
-# Run the 'robust' spider using domains from a file
+# Crawl all discovered domains
 docker-compose run --rm crawler scrapy crawl robust -a domains_file=/app/domains_full.txt
+
+# Or crawl specific domains
+docker-compose run --rm crawler scrapy crawl robust -a domains="bmw.de,siemens.com"
 ```
 
-**Note**: Ensure your domain list file (`domains_full.txt`) is present in the `docker-crawler` root directory (which is mounted to `/app` inside the container).
+**Output:**
+```
+[*] Loaded 500 domains
+============================================================
+[*] Spider started at 2024-12-02 12:00:00
+============================================================
+[*] Progress: 250/500 (50%) | Success: 180 | Failed: 70
+
+============================================================
+           CRAWL SUMMARY
+============================================================
+Duration: 1h 15m 30s
+--- Domains ---
+  Successful:        180
+  Failed:            70
+  Success rate:      72.0%
+--- Items Extracted ---
+  Total items:       180
+============================================================
+```
+
+### Step 4: Export Results
+
+#### Option A: CSV File (Default)
+Results are automatically saved to:
+```
+docker-crawler/data/legal_notices.csv
+```
+
+View on Windows:
+```powershell
+Get-Content .\data\legal_notices.csv | Select-Object -First 5
+```
+
+View on Linux/Mac:
+```bash
+head -5 data/legal_notices.csv
+```
+
+#### Option B: Export from PostgreSQL
+
+```bash
+# Export all columns to CSV
+docker-compose exec postgres psql -U crawler -d crawler -c \
+  "\COPY legal_notices TO '/tmp/export.csv' CSV HEADER"
+docker cp $(docker-compose ps -q postgres):/tmp/export.csv ./data/full_export.csv
+
+# Export selected columns only
+docker-compose exec postgres psql -U crawler -d crawler -c \
+  "\COPY (SELECT domain, company_name, street, postal_code, city, phone, email FROM legal_notices) TO '/tmp/export.csv' CSV HEADER"
+docker cp $(docker-compose ps -q postgres):/tmp/export.csv ./data/contacts.csv
+```
+
+#### Option C: Query Database
+
+```bash
+# Enter PostgreSQL shell
+docker-compose exec postgres psql -U crawler -d crawler
+
+# SQL queries:
+SELECT COUNT(*) FROM legal_notices;
+SELECT domain, company_name, city FROM legal_notices LIMIT 10;
+SELECT * FROM legal_notices WHERE city = 'Berlin';
+
+# Exit
+\q
+```
+
+#### Option D: Export to JSON
+
+```bash
+docker-compose exec postgres psql -U crawler -d crawler -t -c \
+  "SELECT json_agg(row_to_json(legal_notices)) FROM legal_notices" > data/export.json
+```
+
+---
 
 ## Configuration
 
-### extraction & Logic
-The extraction logic is defined in `crawler/legal_crawler/pipelines.py`. It uses a **Hybrid "Anchor" Strategy**:
-1.  **Trafilatura**: Extracts clean main text from HTML.
-2.  **SpaCy (NLP)**: Identifies Organizations and Locations.
-3.  **Anchoring**: Locates the Zip Code/City line and looks *upwards* to find the Company Name and *around* to find the Street.
+### Environment Variables (.env)
 
-### Proxy & Anti-Blocking
-Settings are in `crawler/legal_crawler/settings.py`.
--   **Proxies**: Enabled by default (`PROXY_ENABLED = True`). Fetches free proxies from GitHub lists.
--   **Playwright**: Handles JavaScript rendering.
--   **Retries**: Configured for 3 retries with extended timeouts (90s).
+Create a `.env` file in `docker-crawler/` with your database credentials.
+See `docker-crawler/.env.example` for the required variables:
+- `DB_PASS` - Database password
+- `DATABASE_URL` - Full PostgreSQL connection string
+- `PROXY_ENABLED` - Enable proxy rotation (true/false)
+- `LOG_LEVEL` - Logging level (ERROR recommended)
 
-## Results
-Results are saved to:
-1.  **CSV**: `data/results.csv` (Accessible in the `data` folder on your host machine).
-2.  **PostgreSQL**: Table `results` in the `crawler` database.
+### Crawler Settings
+
+Edit `crawler/legal_crawler/settings.py`:
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `CONCURRENT_REQUESTS` | 8 | Parallel requests |
+| `DOWNLOAD_DELAY` | 1 | Seconds between requests |
+| `DOWNLOAD_TIMEOUT` | 90 | Request timeout (seconds) |
+| `RETRY_TIMES` | 3 | Retry attempts per URL |
+| `PROXY_ENABLED` | True | Use rotating proxies |
+
+---
+
+## Output Fields
+
+| Field | Description | Example |
+|-------|-------------|---------|
+| `domain` | Source domain | `example.de` |
+| `url` | Impressum URL | `https://example.de/impressum` |
+| `company_name` | Company name | `Example GmbH` |
+| `street` | Street address | `Musterstraße 123` |
+| `postal_code` | ZIP code | `12345` |
+| `city` | City | `Berlin` |
+| `phone` | Phone number | `+49 30 12345678` |
+| `email` | Email address | `info@example.de` |
+| `legal_form` | Legal form | `GmbH` |
+| `register_number` | Trade register | `HRB 12345` |
+| `vat_id` | VAT ID | `DE123456789` |
+| `ceo` | Managing director | `Max Mustermann` |
+
+---
 
 ## Troubleshooting
 
-**Timeout Errors?**
-The timeouts have been increased to 90s. If sites are still timing out, they might be extremely slow or blocking the connection entirely.
+### No domains loaded
+```bash
+# Check domains file
+wc -l domains_full.txt
 
-**"Connection Refused" in Docker?**
-Ensure `redis` and `postgres` are running (`docker-compose ps`).
+# Re-run discovery
+docker-compose run --rm crawler python discovery.py --tld de --limit 100
+```
 
-**Low Extraction Quality?**
-Check `data/results.csv`. If specific fields are missing, the site layout might be unique. The current "Anchor" strategy covers ~85% of standard German/Swiss layouts.
+### DATABASE_URL not set
+Create a `.env` file with your credentials (see Configuration section above).
+
+### High 403 error rate
+Edit settings.py:
+```python
+CONCURRENT_REQUESTS = 4      # Reduce parallelism
+DOWNLOAD_DELAY = 3           # Increase delay
+PROXY_ENABLED = True         # Enable proxies
+```
+
+### Services not running
+```bash
+docker-compose ps
+docker-compose up -d redis postgres ollama
+```
+
+### Clean restart
+```bash
+docker-compose down -v --remove-orphans
+docker-compose up -d redis postgres ollama
+docker-compose build crawler
+```
+
+---
+
+## Performance Tips
+
+1. **Targeted Discovery**: Use DuckDuckGo dorks for higher quality domains
+2. **Reduce Concurrency**: Lower `CONCURRENT_REQUESTS` if getting blocked
+3. **Increase Delays**: Set `DOWNLOAD_DELAY = 2` for stubborn sites
+4. **Filter Domains**: Remove large enterprises (they have heavy anti-bot)
+5. **Night Crawling**: Run during off-peak hours for better success rates
+
+---
+
+## Architecture
+
+```
+Discovery (crt.sh + DDG)
+        │
+        ▼
+   domains_full.txt
+        │
+        ▼
+┌───────────────────┐
+│  Scrapy Spider    │
+│  (Playwright)     │
+└─────────┬─────────┘
+          │
+          ▼
+┌───────────────────┐
+│  Trafilatura      │──▶ Clean text extraction
+└─────────┬─────────┘
+          │
+          ▼
+┌───────────────────┐
+│  SpaCy NER        │──▶ Entity recognition
+└─────────┬─────────┘
+          │
+          ▼
+┌───────────────────┐
+│  Anchor Strategy  │──▶ Find ZIP → look up for company
+└─────────┬─────────┘
+          │
+          ▼
+┌───────────────────┐     ┌──────────────────┐
+│  PostgreSQL       │     │  CSV Export      │
+└───────────────────┘     └──────────────────┘
+```
