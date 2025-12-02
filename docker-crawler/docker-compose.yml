@@ -1,0 +1,77 @@
+services:
+  # Redis for task queue and job management
+  redis:
+    image: redis:7-alpine
+    container_name: redis
+    ports:
+      - "6380:6379"
+    volumes:
+      - redis_data:/data
+    restart: unless-stopped
+    command: redis-server --appendonly yes
+    
+  # PostgreSQL for results storage
+  postgres:
+    image: postgres:15-alpine
+    container_name: postgres
+    environment:
+      # Set database password in .env
+      - POSTGRES_USER=crawler
+      - POSTGRES_DB=crawler
+    ports:
+      - "5433:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql
+    restart: unless-stopped
+    
+  # Ollama for local LLM extraction (FREE, no API costs)
+  ollama:
+    image: ollama/ollama:latest
+    container_name: ollama
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 8G
+    
+  # Scrapy crawler with Playwright + Stealth
+  crawler:
+    build: ./crawler
+    depends_on:
+      - redis
+      - postgres
+      - ollama
+    environment:
+      # Database URL set via .env file
+      - DATABASE_URL=${DATABASE_URL}
+      - REDIS_URL=redis://redis:6379/0
+      - OLLAMA_URL=http://ollama:11434
+      PLAYWRIGHT_BROWSERS_PATH: /root/.cache/ms-playwright
+    volumes:
+      - ./data:/app/data
+      - ./domains.txt:/app/domains.txt
+      - ./proxies:/app/proxies
+    working_dir: /app
+    command: ["python", "-c", "print('Crawler ready. Use: docker-compose run --rm crawler scrapy crawl robust')"]
+    
+  # German NER extraction service
+  extractor:
+    build: ./extractor
+    container_name: extractor
+    ports:
+      - "8080:8080"
+    depends_on:
+      - postgres
+    environment:
+      - DATABASE_URL=${DATABASE_URL}
+    restart: unless-stopped
+
+volumes:
+  redis_data:
+  postgres_data:
+  ollama_data:
