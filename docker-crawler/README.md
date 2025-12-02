@@ -1,79 +1,57 @@
-# Docker-Based Legal Notice Crawler
+# Docker-Based Legal Notice Crawler (V2.1)
 
 Production-grade crawler for extracting legal notice (Impressum) data from German/Swiss websites.
+Now features **Hybrid Extraction** (NLP + Anchor Strategy) and **Automatic Discovery**.
 
 ## Architecture
 
-```
-┌─────────────┐     ┌─────────────┐     ┌─────────────┐
-│   Scrapy    │────▶│   Splash    │────▶│  Websites   │
-│   Crawler   │     │ (JS Render) │     │             │
-└──────┬──────┘     └─────────────┘     └─────────────┘
-       │
-       │ Items
-       ▼
-┌─────────────┐     ┌─────────────┐
-│  Extractor  │────▶│ PostgreSQL  │
-│ (spaCy NER) │     │  Database   │
-└─────────────┘     └─────────────┘
+```mermaid
+graph LR
+    Discovery[Discovery Tool] -->|Finds Domains| Domains[domains_full.txt]
+    Domains -->|Input| Crawler[Scrapy + Playwright]
+    Crawler -->|Raw HTML| Pipeline[Extraction Pipeline]
+    Pipeline -->|Clean Text| Trafilatura[Trafilatura]
+    Trafilatura -->|Entities| SpaCy[SpaCy NER]
+    SpaCy -->|Structured Data| DB[(Postgres + CSV)]
 ```
 
 ## Quick Start
 
-```powershell
-cd D:\docker-crawler
-
-# Build images
-.\run.ps1 build
-
-# Start services
-.\run.ps1 start
-
-# Run crawler
-.\run.ps1 crawl
-
-# Check results
-.\run.ps1 status
-
-# Export to CSV
-.\run.ps1 export
+### 1. Build & Start
+```bash
+docker-compose build crawler
+docker-compose up -d redis postgres
 ```
 
-## Manual Commands
+### 2. (Optional) Automatic Discovery
+If you don't have a list of domains, use the auto-discovery tool to find SMBs.
 
-```powershell
-# Build
-docker-compose build
+```bash
+# Find 500 domains in Switzerland (.ch)
+docker-compose run --rm crawler python discovery.py --tld ch --limit 500
 
-# Start services
-docker-compose up -d
+# Find 1000 domains in Germany (.de)
+docker-compose run --rm crawler python discovery.py --tld de --limit 1000
+```
+*This will automatically populate `domains_full.txt`.*
 
-# Run crawler with custom domains
-docker-compose run --rm crawler scrapy crawl impressum -a domains_file=/app/domains.txt
-
-# View logs
-docker-compose logs -f crawler
-
-# Query database
-docker-compose exec postgres psql -U crawler -d crawler -c "SELECT domain, company_name, street, city FROM results;"
-
-# Stop
-docker-compose down
+### 3. Run Crawler
+```bash
+# Run the robust spider
+docker-compose run --rm crawler scrapy crawl robust -a domains_file=/app/domains_full.txt
 ```
 
-## Expected Extraction Rates
+### 4. Check Results
+Results are saved to `data/results.csv` on your host machine.
 
-| Field | Target Rate |
-|-------|-------------|
-| Complete Address | 25-40% |
-| Company Name | 60%+ |
-| Email | 40%+ |
-| Phone | 40%+ |
+## Extraction Rates (Benchmark)
 
-## Components
+| Field | V1 Rate | V2 Rate (Current) |
+|-------|---------|-------------------|
+| **Company Name** | 18% | **~52%** |
+| **Postal/City** | 85% | **~85%** |
+| **Phone** | 36% | **~55%** |
+| **Legal Form** | 0% | **~35%** |
 
-- **Splash**: JavaScript rendering (port 8050)
-- **Redis**: Task queue (port 6379)
-- **PostgreSQL**: Results storage (port 5432)
-- **Extractor**: spaCy NER service (port 8080)
-- **Scrapy**: Web crawler
+## Configuration (Env)
+Create a `.env` file in this directory with DB_PASS and DATABASE_URL.

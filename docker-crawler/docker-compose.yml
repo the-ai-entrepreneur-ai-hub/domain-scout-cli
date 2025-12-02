@@ -51,7 +51,7 @@ services:
       - DATABASE_URL=${DATABASE_URL}
       - REDIS_URL=redis://redis:6379/0
       - OLLAMA_URL=http://ollama:11434
-      PLAYWRIGHT_BROWSERS_PATH: /root/.cache/ms-playwright
+      - PLAYWRIGHT_BROWSERS_PATH=/root/.cache/ms-playwright
     volumes:
       - ./data:/app/data
       - ./domains.txt:/app/domains.txt
