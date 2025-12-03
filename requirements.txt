@@ -43,3 +43,4 @@ undetected-chromedriver>=3.5.0
 python-dateutil>=2.8.2
 validators>=0.22.0
 python-whois>=0.9.0
+asyncwhois>=1.1.0

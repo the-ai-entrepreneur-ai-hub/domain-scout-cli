@@ -16,7 +16,21 @@ class FieldValidators:
         'suche', 'search', 'warenkorb', 'cart', 'wishlist', 'account',
         'registrieren', 'register', 'abonnieren', 'subscribe', 'footer',
         'header', 'sidebar', 'widget', 'banner', 'popup', 'modal',
-        'javascript', 'undefined', 'null', 'error', 'loading'
+        'javascript', 'undefined', 'null', 'error', 'loading',
+        # German sentence fragments (from test results)
+        'unterlieg', 'haben wir', 'einer plattform', 'einfluss', 'zurück',
+        'webseite', 'dieser', 'seite', 'sowie', 'werden', 'können',
+        'müssen', 'sollten', 'dürfen', 'sollen', 'wurde', 'wird',
+        'darüber', 'hinaus', 'jedoch', 'daher', 'somit', 'dabei',
+        'zudem', 'außerdem', 'weiterhin', 'darauf', 'hierbei',
+        'allen frag', 'jeweiligen', 'keinen einfluss', 'in der reg',
+        'movingimag', 'des tools', 'übertrag', 'angegebenen',
+        'dar. der vertrag', 'vereinsreg',
+        # Common false positives from test results
+        'offenlegung', 'disclosure', 'registrar', 'namesilo',
+        'unicredit bank', 'paypal', 'stripe', 'klarna', 'amazon payments',
+        'google analytics', 'facebook pixel', 'twitter', 'instagram',
+        'datenschutz', 'impressum', 'legal notice', 'privacy policy'
     ]
     
     # VAT patterns by country
@@ -58,6 +72,22 @@ class FieldValidators:
         """Validate and clean company name."""
         if not name:
             return None
+        
+        # Handle list input (JSON-LD can return lists) - CRITICAL BUG FIX
+        if isinstance(name, list):
+            if not name:
+                return None
+            # Take first non-empty string from list
+            name = next((item for item in name if isinstance(item, str) and item.strip()), '')
+            if not name:
+                return None
+        
+        # Ensure it's a string
+        if not isinstance(name, str):
+            return None
+            
+        # Convert to string if needed (handles other types)
+        name = str(name)
             
         # Clean whitespace
         name = ' '.join(name.split())
@@ -84,6 +114,47 @@ class FieldValidators:
         special_count = sum(1 for c in name if not c.isalnum() and c not in ' .-&')
         if special_count > len(name) * 0.2:
             return None
+        
+        # Reject sentence-like text (contains common sentence-ending patterns)
+        sentence_patterns = [
+            r'\.\s+[A-Z]',  # Period followed by capital letter
+            r'\?\s*$',      # Ends with question mark
+            r'!\s*$',       # Ends with exclamation
+            r',\s+[a-z]',   # Comma followed by lowercase (mid-sentence)
+            r'\b(der|die|das|und|oder|aber|denn|für|mit|von|zu|bei|nach|vor|über|unter|zwischen)\b',  # German articles/prepositions
+        ]
+        
+        for pattern in sentence_patterns:
+            if re.search(pattern, name, re.IGNORECASE):
+                return None
+        
+        # Must contain at least one capital letter (proper noun)
+        if not any(c.isupper() for c in name):
+            return None
+        
+        # Reject known registrar companies and service providers
+        registrar_companies = [
+            'namesilo', 'godaddy', 'namecheap', 'domains by proxy',
+            'whoisguard', 'perfect privacy', 'privacy protection',
+            'unicredit bank austria', 'raiffeisen', 'erste bank',
+            'paypal', 'stripe', 'klarna', 'amazon web services',
+        ]
+        
+        name_lower = name.lower()
+        for registrar in registrar_companies:
+            if registrar in name_lower:
+                return None
+        
+        # Reject if starts with disclosure/legal terms
+        disclosure_prefixes = [
+            'offenlegung', 'disclosure', 'impressum', 'legal notice',
+            'datenschutz', 'privacy policy', 'terms of service',
+            'nutzungsbedingungen', 'allgemeine geschäftsbedingungen'
+        ]
+        
+        for prefix in disclosure_prefixes:
+            if name_lower.startswith(prefix):
+                return None
             
         return name.strip()
 

@@ -588,10 +588,67 @@ async def print_statistics():
             
     print("="*50)
 
-def classify_company_size(legal_form: str, employee_count: int = 0) -> str:
+# Known enterprise domains (root domain names)
+ENTERPRISE_DOMAINS = {
+    'google', 'facebook', 'amazon', 'microsoft', 'apple', 'netflix', 'twitter',
+    'linkedin', 'instagram', 'youtube', 'ebay', 'alibaba', 'tencent', 'baidu',
+    'yahoo', 'bing', 'adobe', 'oracle', 'ibm', 'sap', 'salesforce', 'cisco',
+    'intel', 'nvidia', 'amd', 'samsung', 'sony', 'huawei', 'dell', 'hp',
+    'siemens', 'bosch', 'volkswagen', 'bmw', 'daimler', 'mercedes', 'allianz',
+    'basf', 'bayer', 'henkel', 'lufthansa', 'telekom', 'vodafone', 'telefonica',
+    'spotify', 'airbnb', 'booking', 'uber', 'lyft', 'paypal', 'stripe', 'visa',
+    'mastercard', 'zoom', 'slack', 'atlassian', 'zendesk', 'hubspot', 'shopify',
+    'cloudflare', 'digitalocean', 'heroku', 'github', 'gitlab', 'bitbucket',
+    'stackoverflow', 'wikipedia', 'reddit', 'quora', 'medium', 'wordpress',
+    'zalando', 'otto', 'focus', 'spiegel', 'bild', 'welt', 'zeit', 'faz',
+    'tagesschau', 'zdf', 'ard', 'rtl', 'prosieben', 'commerzbank', 'deutschebank',
+}
+
+def is_enterprise_domain(domain: str) -> bool:
+    """Check if domain belongs to a known enterprise."""
+    if not domain:
+        return False
+    
+    domain_lower = domain.lower()
+    
+    # Extract root domain (e.g., "google" from "google.de")
+    parts = domain_lower.split('.')
+    if len(parts) >= 2:
+        root = parts[-2]  # Second to last part (before TLD)
+        if root in ENTERPRISE_DOMAINS:
+            return True
+    
+    # Also check if any enterprise name is contained
+    for enterprise in ENTERPRISE_DOMAINS:
+        if enterprise in domain_lower:
+            return True
+    
+    return False
+
+# Government domain indicators
+GOV_INDICATORS = [
+    '.gov', '.gv.', 'bundesamt', 'ministerium', 'verwaltung', 
+    'stadt.', 'gemeinde', 'landratsamt', 'bezirksamt', 'rathaus',
+    'bundesregierung', 'landesregierung', 'government', 'municipality',
+    'bundesanstalt', 'bundesbehörde', 'behörde'
+]
+
+def classify_company_size(legal_form: str, employee_count: int = 0, domain: str = None) -> str:
     """
-    Heuristic classification of company size based on legal form and data.
+    Heuristic classification of company size based on legal form, domain, and data.
+    Returns: solo, sme, enterprise, government, or unknown
     """
+    domain_lower = (domain or "").lower()
+    
+    # 1. Check for government/public sector
+    if any(g in domain_lower for g in GOV_INDICATORS):
+        return "government"
+    
+    # 2. Check if domain is known enterprise
+    if domain and is_enterprise_domain(domain):
+        return "enterprise"
+    
+    # 3. Check employee count
     if employee_count > 250:
         return "enterprise"
     if employee_count > 10:
@@ -599,25 +656,169 @@ def classify_company_size(legal_form: str, employee_count: int = 0) -> str:
         
     form = (legal_form or "").lower()
     
-    # Enterprise indicators
-    if any(x in form for x in ['ag', 'se', 'kgaa', 'aktiengesellschaft']):
+    # 4. Government legal forms
+    if any(x in form for x in ['körperschaft', 'anstalt des öffentlichen rechts', 'aör', 'k.d.ö.r.']):
+        return "government"
+    
+    # 5. Enterprise indicators from legal form
+    if any(x in form for x in ['ag', 'se', 'kgaa', 'aktiengesellschaft', 'plc', 'corporation', 'corp']):
         return "enterprise"
         
-    # SME indicators (GmbH is standard, could be large but default to SME)
-    if any(x in form for x in ['gmbh', 'co. kg', 'limited', 'ltd', 'sarl', 's.a.', 's.r.l']):
+    # 6. SME indicators (GmbH is standard, could be large but default to SME)
+    if any(x in form for x in ['gmbh', 'co. kg', 'limited', 'ltd', 'sarl', 's.a.', 's.r.l', 'llc']):
         return "sme"
         
-    # Solo/Micro indicators
-    if any(x in form for x in ['ug', 'gbr', 'e.k.', 'einzelunternehmen', 'freiberufler', 'selbstständig']):
+    # 7. Solo/Micro indicators
+    if any(x in form for x in ['ug', 'gbr', 'e.k.', 'einzelunternehmen', 'freiberufler', 'selbstständig', 'sole']):
         return "solo"
         
-    # Default fallback
-    return "sme"
+    # 8. Default fallback
+    return "unknown"
 
-async def export_unified(output_path: str = None, tld_filter: str = None, run_id: str = None):
+def validate_ceo_name(name: str) -> str:
+    """Validate CEO/director name - must be real person name."""
+    if not name:
+        return ""
+    
+    name = name.strip()
+    name_lower = name.lower()
+    
+    # Garbage names and patterns to reject
+    INVALID_NAMES = {
+        'wir', 'uns', 'sie', 'ihr', 'du', 'we', 'you', 'they', 'us', 'i',
+        'nginx', 'apache', 'wordpress', 'cloudflare', 'google', 'microsoft',
+        'server', 'hosting', 'domain', 'admin', 'webmaster', 'root', 'user',
+        'kontakt', 'contact', 'impressum', 'legal', 'info', 'support',
+        'kunden', 'customer', 'service', 'team', 'staff', 'management',
+        'geschäftsführer', 'director', 'manager', 'ceo', 'inhaber',
+        'natürliche personen', 'juristische person', 'person des anbieters',
+        'vertretungsberechtigter', 'verantwortlicher', 'betreiber',
+        'redaktion', 'herausgeber', 'autor', 'editor', 'publisher',
+        'firma', 'company', 'organisation', 'organization',
+    }
+    
+    if name_lower in INVALID_NAMES:
+        return ""
+    
+    # Reject if contains these patterns (not exact match)
+    GARBAGE_PATTERNS = [
+        'natürliche person', 'juristische person', 'person des',
+        'vertretungsberechtigt', 'verantwortlich', 'im sinne',
+        'gemäß', 'nach § ', 'i.s.d.', 'gemass', 'gemaess',
+        'nicht verfügbar', 'n/a', 'none', 'unknown', 'unbekannt',
+        'betroffene person', 'betroffenen', 'der gesellschaft',
+        'die gesellschaft', 'in allen', 'gerichtlichen', 'außergerichtlichen',
+        'angelegenheiten', 'handelsregister', 'amtsgericht',
+    ]
+    if any(p in name_lower for p in GARBAGE_PATTERNS):
+        return ""
+    
+    # Must have at least 2 words (first + last name) or be a title+name
+    words = name.split()
+    if len(words) < 2:
+        return ""
+    
+    # Reject if too short or too long
+    if len(name) < 5 or len(name) > 80:
+        return ""
+    
+    return name
+
+def validate_street(street: str) -> str:
+    """Validate street - must be street + house number only."""
+    if not street:
+        return ""
+    
+    street = street.strip()
+    
+    # Reject if just a country code
+    if len(street) <= 3 and street.upper() in {'DE', 'AT', 'CH', 'US', 'UK', 'FR', 'NL', 'BE', 'IT'}:
+        return ""
+    
+    # Reject multi-line content
+    if '\n' in street or '\r' in street:
+        return ""
+    
+    # Reject if too short (just country code or garbage)
+    if len(street) < 5:
+        return ""
+    
+    # Reject if too long (likely garbage)
+    if len(street) > 80:
+        return ""
+    
+    # Reject if contains garbage patterns
+    garbage = ['http', '@', 'gmbh', 'ag', 'tel', 'fax', 'email', 'kontakt', 'geschäftsführer',
+               'server at', 'port ', 'www.', 'cookie', 'javascript', 'datenschutz']
+    if any(g in street.lower() for g in garbage):
+        return ""
+    
+    # If street contains multiple commas (full address mixed in), try to extract just street
+    if street.count(',') >= 2:
+        # Likely format: "Street 123, 12345, City, Country"
+        parts = street.split(',')
+        if parts[0].strip():
+            street = parts[0].strip()
+    
+    return street
+
+def validate_postal_code(code: str) -> str:
+    """Validate postal code - supports international formats (DE, CH, AT, FR, NL, UK, etc.)."""
+    if not code:
+        return ""
+    
+    code = code.strip()
+    import re
+    
+    # German/French/Italian: 5 digits
+    if re.match(r'^\d{5}$', code):
+        return code
+    
+    # Swiss/Austrian/Belgian: 4 digits (with optional country prefix)
+    if re.match(r'^(?:CH-?|A-?|B-?)?\d{4}$', code.upper()):
+        return code
+    
+    # Dutch: 4 digits + 2 letters (e.g., "1012 LG")
+    if re.match(r'^\d{4}\s*[A-Z]{2}$', code.upper()):
+        return code.upper()
+    
+    # UK: Various alphanumeric formats (e.g., "SW1A 2AA")
+    if re.match(r'^[A-Z]{1,2}\d[A-Z\d]?\s*\d[A-Z]{2}$', code.upper()):
+        return code.upper()
+    
+    return ""
+
+def validate_city(city: str) -> str:
+    """Validate city - must be letters only, 2-40 chars."""
+    if not city:
+        return ""
+    
+    city = city.strip()
+    
+    # Reject if too long or short
+    if len(city) < 2 or len(city) > 40:
+        return ""
+    
+    # Reject if contains garbage
+    garbage = ['tel', 'fax', 'http', 'email', 'phone', 'gmbh', '@', 'www']
+    if any(g in city.lower() for g in garbage):
+        return ""
+    
+    # Should be mostly letters
+    import re
+    letter_count = len(re.findall(r'[a-zA-ZäöüÄÖÜß]', city))
+    if letter_count < len(city) * 0.7:
+        return ""
+    
+    return city
+
+async def export_unified(output_path: str = None, tld_filter: str = None, run_id: str = None, complete_only: bool = False):
     """
     Export Unified Results (Client Spec Compliance).
-    A single "Golden Record" CSV with strict schema.
+    A single "Golden Record" CSV with EXACTLY 23 columns.
+    
+    Args:
+        complete_only: If True, only export entries with company_name AND at least one address field
     """
     # Handle 'latest' keyword
     if run_id == 'latest':
@@ -632,7 +833,7 @@ async def export_unified(output_path: str = None, tld_filter: str = None, run_id
     
     async with aiosqlite.connect(DB_PATH) as db:
         # Join results_enhanced, legal_entities, and queue (for robots status)
-        
+        # FIXED: Now correctly fetching robots_status and robots_reason from queue table
         query = """
             SELECT 
                 r.domain, r.crawled_at, r.run_id,
@@ -642,15 +843,15 @@ async def export_unified(output_path: str = None, tld_filter: str = None, run_id
                 l.ceo_name, l.directors,
                 r.industry,
                 r.emails, r.phones,
-                l.fax as fax_number,
-                COALESCE(l.street_address, l.registered_street) as street,
-                COALESCE(l.postal_code, l.registered_zip) as postal_code,
-                COALESCE(l.city, l.registered_city) as city,
-                COALESCE(l.country, l.registered_country) as country,
+                COALESCE(l.fax, l.fax_number, '') as fax_number,
+                COALESCE(l.street_address, l.registered_street, '') as street,
+                COALESCE(l.postal_code, l.registered_zip, '') as postal_code,
+                COALESCE(l.city, l.registered_city, '') as city,
+                COALESCE(l.country, l.registered_country, '') as country,
                 r.description as service_product_description,
                 r.social_linkedin, r.social_twitter, r.social_facebook, r.social_instagram, r.social_youtube,
-                l.registrant_name as whois_created_date, -- Placeholder if not available column
-                q.status as robots_allowed -- Placeholder, need actual column
+                q.robots_status,
+                q.robots_reason
             FROM results_enhanced r
             LEFT JOIN legal_entities l ON r.domain = l.domain
             LEFT JOIN queue q ON r.domain = q.domain
@@ -674,33 +875,34 @@ async def export_unified(output_path: str = None, tld_filter: str = None, run_id
                 rows = await cursor.fetchall()
         except Exception as e:
             logger.error(f"Unified export query failed: {e}")
-            return
+            return None
             
     if not rows:
         logger.warning("No results found for unified export.")
-        return
+        return None
 
-    # Client Spec Columns
+    # Client Spec Columns - EXACTLY 23 columns in specified order
     columns = [
-        # REGISTRY
+        # REGISTRY (7)
         'company_name', 'legal_form', 'registration_number', 'ceo_names', 
         'owner_organization', 'industry', 'company_size',
-        # CONTACT
+        # CONTACT (3)
         'emails', 'phone_numbers', 'fax_numbers',
-        # LOCATION
+        # LOCATION (4)
         'street', 'postal_code', 'city', 'country',
-        # PRODUCT
+        # PRODUCT (1)
         'service_product_description',
-        # SOCIAL
+        # SOCIAL (1)
         'social_links',
-        # META
+        # META (2)
         'website_created_at', 'website_last_updated_at',
-        # TECH
+        # TECH (3)
         'domain', 'crawled_at', 'run_id',
-        # PERMS
+        # PERMS (2)
         'robots_allowed', 'robots_reason'
     ]
     
+    exported_count = 0
     with open(output_path, 'w', newline='', encoding='utf-8-sig') as f:
         writer = csv.DictWriter(f, fieldnames=columns)
         writer.writeheader()
@@ -713,25 +915,34 @@ async def export_unified(output_path: str = None, tld_filter: str = None, run_id
              ceo_name, directors,
              industry,
              emails, phones, fax,
-             street, zip_code, city, country,
+             street, postal_code, city, country,
              desc,
              li, tw, fb, ig, yt,
-             whois_date, robots_status) = row
+             robots_status, robots_reason) = row
             
-            # Logic: Company Name
+            # Validate and clean company name
             final_name = legal_name if legal_name else web_company_name
+            if final_name:
+                final_name = final_name.strip()[:100]  # Max 100 chars
             
-            # Logic: CEO Names
+            # Validate CEO names - filter garbage
             ceos = []
-            if ceo_name: ceos.append(ceo_name)
+            validated_ceo = validate_ceo_name(ceo_name or "")
+            if validated_ceo:
+                ceos.append(validated_ceo)
             if directors:
                 try:
                     dirs = json.loads(directors)
-                    if isinstance(dirs, list): ceos.extend(dirs)
-                except: pass
+                    if isinstance(dirs, list):
+                        for d in dirs:
+                            validated_dir = validate_ceo_name(d)
+                            if validated_dir:
+                                ceos.append(validated_dir)
+                except: 
+                    pass
             final_ceos = "; ".join(list(set(ceos)))
             
-            # Logic: Social Links
+            # Build social links JSON
             socials = {}
             if li: socials['linkedin'] = li
             if fb: socials['facebook'] = fb
@@ -740,40 +951,202 @@ async def export_unified(output_path: str = None, tld_filter: str = None, run_id
             if yt: socials['youtube'] = yt
             social_str = json.dumps(socials) if socials else ""
             
-            # Logic: Company Size
-            size = classify_company_size(legal_form)
+            # Classify company size (includes government)
+            size = classify_company_size(legal_form, domain=domain)
             
-            # Logic: Contact formatting
+            # Format contact fields
             email_str = emails.replace(',', '; ') if emails else ""
             phone_str = phones.replace(',', '; ') if phones else ""
             
+            # Validate location fields
+            clean_street = validate_street(street or "")
+            clean_postal = validate_postal_code(postal_code or "")
+            clean_city = validate_city(city or "")
+            
+            # Map robots_status to true/false
+            robots_allowed_bool = "true" if robots_status == "ALLOWED" else "false"
+            robots_reason_str = robots_reason or ("allowed" if robots_status == "ALLOWED" else "unknown")
+            
+            # Skip incomplete records if complete_only is set
+            if complete_only:
+                has_company = bool(final_name and len(final_name) > 2)
+                has_address = bool(clean_street or clean_postal or clean_city)
+                if not (has_company and has_address):
+                    continue
+            
             record = {
-                'company_name': final_name,
-                'legal_form': legal_form,
-                'registration_number': reg_num,
+                'company_name': final_name or "",
+                'legal_form': (legal_form or "").strip(),
+                'registration_number': (reg_num or "").strip(),
                 'ceo_names': final_ceos,
-                'owner_organization': "", # Not currently extracted reliably
-                'industry': industry,
+                'owner_organization': "",  # Not reliably extracted
+                'industry': (industry or "").strip(),
                 'company_size': size,
                 'emails': email_str,
                 'phone_numbers': phone_str,
-                'fax_numbers': fax,
-                'street': street,
-                'postal_code': zip_code,
-                'city': city,
-                'country': country,
+                'fax_numbers': (fax or "").strip(),
+                'street': clean_street,
+                'postal_code': clean_postal,
+                'city': clean_city,
+                'country': (country or "").strip(),
                 'service_product_description': (desc or "")[:500],
                 'social_links': social_str,
-                'website_created_at': "", # Need WHOIS column in DB
-                'website_last_updated_at': "", # Need Headers column in DB
+                'website_created_at': "",  # Future: from WHOIS
+                'website_last_updated_at': "",  # Future: from HTTP headers
                 'domain': domain,
                 'crawled_at': crawled_at,
                 'run_id': run_id_val,
-                'robots_allowed': "True" if robots_status != "FAILED_ROBOTS" else "False", # Approx logic until column added
-                'robots_reason': ""
+                'robots_allowed': robots_allowed_bool,
+                'robots_reason': robots_reason_str
             }
             
             writer.writerow(record)
+            exported_count += 1
             
-    logger.info(f"Exported {len(rows)} unified results to {output_path}")
+    if complete_only:
+        logger.info(f"Exported {exported_count} complete records (of {len(rows)} total) to {output_path}")
+    else:
+        logger.info(f"Exported {exported_count} unified results to {output_path}")
+    return output_path
+
+
+# CLIENT SPEC: Export ONLY the 6 required fields
+CLIENT_SPEC_COLUMNS = [
+    'domain',
+    # 1. Company/Person Name
+    'company_name',
+    # 2. Legal Form
+    'legal_form',
+    # 3. Full Address
+    'street', 'postal_code', 'city', 'country',
+    # 4. Authorized Representatives
+    'ceo_name', 'directors',
+    # 5. Contact Information
+    'email', 'phone',
+    # 6. Register Details
+    'register_type', 'register_court', 'registration_number',
+]
+
+
+async def export_client_spec(output_path: str = None, tld_filter: str = None, run_id: str = None):
+    """
+    Export ONLY the 6 required fields per client spec.
+    
+    Fields:
+    1. Company or responsible person's name
+    2. Legal form of the entity
+    3. Full postal address (street, ZIP code, city, country)
+    4. Authorized representatives
+    5. Contact information (email and phone number)
+    6. Register details (type of register, register court, and registration number)
+    """
+    if run_id == 'latest':
+        run_id = await get_latest_run_id()
+    
+    if not output_path:
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        output_path = f"data/client_spec_{timestamp}.csv"
+        
+    output_path = Path(output_path)
+    output_path.parent.mkdir(exist_ok=True)
+    
+    async with aiosqlite.connect(DB_PATH) as db:
+        query = """
+            SELECT 
+                l.domain,
+                COALESCE(l.legal_name, r.company_name, '') as company_name,
+                l.legal_form,
+                COALESCE(l.street_address, l.registered_street, '') as street,
+                COALESCE(l.postal_code, l.registered_zip, '') as postal_code,
+                COALESCE(l.city, l.registered_city, '') as city,
+                COALESCE(l.country, l.registered_country, 'Germany') as country,
+                l.ceo_name,
+                l.directors,
+                COALESCE(l.email, l.legal_email, '') as email,
+                COALESCE(l.phone, l.legal_phone, '') as phone,
+                l.register_type,
+                l.register_court,
+                l.registration_number
+            FROM legal_entities l
+            LEFT JOIN results_enhanced r ON l.domain = r.domain
+            WHERE 1=1
+        """
+        
+        params = []
+        if run_id:
+            query += " AND l.run_id = ?"
+            params.append(run_id)
+            
+        if tld_filter:
+            tld = tld_filter if tld_filter.startswith('.') else f'.{tld_filter}'
+            query += " AND l.domain LIKE ?"
+            params.append(f'%{tld}')
+            
+        query += " ORDER BY l.extraction_confidence DESC"
+        
+        try:
+            async with db.execute(query, params) as cursor:
+                rows = await cursor.fetchall()
+        except Exception as e:
+            logger.error(f"Client spec export query failed: {e}")
+            return None
+            
+    if not rows:
+        logger.warning("No legal entities found for client spec export.")
+        return None
+
+    exported_count = 0
+    complete_count = 0
+    
+    with open(output_path, 'w', newline='', encoding='utf-8-sig') as f:
+        writer = csv.DictWriter(f, fieldnames=CLIENT_SPEC_COLUMNS)
+        writer.writeheader()
+        
+        for row in rows:
+            (domain, company_name, legal_form, street, postal_code, city, country,
+             ceo_name, directors, email, phone, reg_type, reg_court, reg_num) = row
+            
+            # Parse directors JSON if present
+            directors_str = ""
+            if directors:
+                try:
+                    dirs = json.loads(directors)
+                    if isinstance(dirs, list):
+                        directors_str = "; ".join(str(d) for d in dirs if d)
+                except:
+                    directors_str = str(directors)
+            
+            record = {
+                'domain': domain,
+                'company_name': (company_name or "").strip(),
+                'legal_form': (legal_form or "").strip(),
+                'street': (street or "").strip(),
+                'postal_code': (postal_code or "").strip(),
+                'city': (city or "").strip(),
+                'country': (country or "").strip(),
+                'ceo_name': (ceo_name or "").strip(),
+                'directors': directors_str,
+                'email': (email or "").strip(),
+                'phone': (phone or "").strip(),
+                'register_type': (reg_type or "").strip(),
+                'register_court': (reg_court or "").strip(),
+                'registration_number': (reg_num or "").strip(),
+            }
+            
+            writer.writerow(record)
+            exported_count += 1
+            
+            # Count complete records (all 6 fields filled)
+            has_name = bool(record['company_name'])
+            has_form = bool(record['legal_form'])
+            has_addr = bool(record['street'] and record['postal_code'] and record['city'])
+            has_rep = bool(record['ceo_name'] or record['directors'])
+            has_contact = bool(record['email'] or record['phone'])
+            has_register = bool(record['registration_number'])
+            
+            if has_name and has_form and has_addr and has_rep and has_contact and has_register:
+                complete_count += 1
+            
+    logger.info(f"Client Spec Export: {exported_count} records ({complete_count} complete) to {output_path}")
+    logger.info(f"Completion rate: {complete_count}/{exported_count} ({complete_count/exported_count*100:.1f}%)" if exported_count > 0 else "No records")
     return output_path
