@@ -67,6 +67,35 @@ class EnhancedExtractor:
             'welcome', 'willkommen', 'home', 'homepage', 'startseite',
             'index', 'default', 'untitled', 'contact', 'about'
         }
+        
+        # Garbage patterns that indicate bad extraction
+        self.garbage_patterns = [
+            r'\d{4}',  # Years like 2025
+            r'https?://',  # URLs
+            r'www\.',  # WWW prefix
+            r'^[\d\.\,]+$',  # Only numbers
+            r'\(\d+\)',  # Cart count like (0)
+            r'[|/\\]{2,}',  # Multiple separators
+            r'^\d+\.',  # Starts with number and dot
+            r'cookie',  # Cookie notices
+            r'newsletter',  # Newsletter forms
+            r'warenkorb',  # Shopping cart
+            r'anmelden',  # Login
+            r'registrieren',  # Register
+            r'suche',  # Search
+            r'menü',  # Menu
+            r'navigation',  # Navigation
+        ]
+        
+        # Noise words that indicate navigation/UI elements
+        self.noise_words = [
+            'navigation', 'menu', 'cookie', 'newsletter', 'anmelden', 'login',
+            'suche', 'search', 'warenkorb', 'cart', 'wishlist', 'account',
+            'registrieren', 'register', 'abonnieren', 'subscribe', 'footer',
+            'header', 'sidebar', 'widget', 'banner', 'popup', 'modal',
+            'javascript', 'undefined', 'null', 'error', 'loading', 'mehr',
+            'weiterlesen', 'read more', 'click here', 'jetzt', 'hier'
+        ]
 
     def extract_structured_data(self, html: str, base_url: str) -> Dict[str, Any]:
         """Extract all structured data formats from HTML."""
@@ -234,15 +263,64 @@ class EnhancedExtractor:
             
         return False, ""
 
+    def validate_company_name(self, name: str) -> Optional[str]:
+        """Validate and clean company name, returns None if invalid."""
+        if not name:
+            return None
+            
+        # Clean whitespace
+        name = ' '.join(name.split())
+        
+        # Length checks
+        if len(name) < 3 or len(name) > 100:
+            return None
+            
+        # Word count check (max 10 words for company name)
+        words = name.split()
+        if len(words) > 10:
+            return None
+            
+        # Check for garbage patterns
+        name_lower = name.lower()
+        for pattern in self.garbage_patterns:
+            if re.search(pattern, name_lower):
+                return None
+                
+        # Check for noise words
+        if any(noise in name_lower for noise in self.noise_words):
+            return None
+            
+        # Check for generic titles
+        if name_lower.strip() in self.generic_titles:
+            return None
+            
+        # Reject if mostly numbers
+        letter_count = sum(1 for c in name if c.isalpha())
+        if letter_count < len(name) * 0.4:
+            return None
+            
+        # Reject if too many special characters
+        special_count = sum(1 for c in name if not c.isalnum() and c not in ' .-&()äöüÄÖÜß')
+        if special_count > len(name) * 0.2:
+            return None
+            
+        # Reject navigation-like patterns (multiple pipes/dashes)
+        if name.count('|') > 1 or name.count(' - ') > 2:
+            return None
+            
+        return name.strip()
+
     def extract_company_name(self, soup: BeautifulSoup, structured_data: Dict, domain: str) -> str:
-        """Extract company name from multiple sources."""
+        """Extract company name from multiple sources with strict validation."""
         candidates = []
         
-        # 1. From structured data
+        # 1. From structured data (highest priority - usually clean)
         for extractor in [self.extract_from_jsonld, self.extract_from_microdata, self.extract_from_opengraph]:
             data = extractor(structured_data)
             if data.get('company_name'):
-                candidates.append((data['company_name'], 10))  # Highest priority
+                validated = self.validate_company_name(data['company_name'])
+                if validated:
+                    candidates.append((validated, 15))  # Highest priority
                 
         # 2. From copyright notice
         footer = soup.find('footer') or soup
@@ -250,47 +328,47 @@ class EnhancedExtractor:
         copyright_match = self.copyright_regex.search(copyright_text)
         if copyright_match:
             company = copyright_match.group(1).strip()
-            if company and len(company) > 2:
-                candidates.append((company, 8))
+            validated = self.validate_company_name(company)
+            if validated:
+                candidates.append((validated, 10))
                 
-        # 3. From VAT/Tax ID
-        vat_match = self.vat_regex.search(soup.get_text())
-        if vat_match:
-            # Often followed by company name
-            context = soup.get_text()[max(0, vat_match.start()-100):vat_match.end()+100]
-            lines = context.split('\n')
-            for line in lines:
-                if len(line) > 3 and not any(x in line.lower() for x in ['vat', 'ust', 'uid']):
-                    candidates.append((line.strip()[:50], 5))
-                    break
-                    
-        # 4. From title tag
+        # 3. From title tag (be careful - often contains garbage)
         if soup.title and soup.title.string:
             title = soup.title.string.strip()
-            # Clean common patterns
-            for sep in [' | ', ' - ', ' :: ', ' — ']:
+            # Clean common patterns - take FIRST part before separator
+            for sep in [' | ', ' - ', ' :: ', ' — ', ' – ']:
                 if sep in title:
                     parts = title.split(sep)
-                    # Usually company name is first or last
-                    candidates.append((parts[0].strip(), 3))
-                    if len(parts) > 1:
-                        candidates.append((parts[-1].strip(), 3))
+                    first_part = parts[0].strip()
+                    validated = self.validate_company_name(first_part)
+                    if validated:
+                        candidates.append((validated, 5))
+                    break
+            else:
+                # No separator, validate entire title if short
+                if len(title) < 50:
+                    validated = self.validate_company_name(title)
+                    if validated:
+                        candidates.append((validated, 3))
                         
-        # 5. From h1 tag
+        # 4. From h1 tag (lower priority - often page content)
         h1 = soup.find('h1')
         if h1:
             text = h1.get_text().strip()
-            if text and len(text) < 100:
-                candidates.append((text, 2))
+            if text and len(text) < 60:
+                validated = self.validate_company_name(text)
+                if validated:
+                    candidates.append((validated, 2))
                 
         # Select best candidate
         if candidates:
-            # Sort by priority
-            candidates.sort(key=lambda x: x[1], reverse=True)
-            for name, _priority in candidates:
-                if name and name.strip().lower() not in self.generic_titles:
-                    return name.strip()
-        return domain
+            # Sort by priority, then by length (prefer shorter/cleaner names)
+            candidates.sort(key=lambda x: (x[1], -len(x[0])), reverse=True)
+            return candidates[0][0]
+            
+        # Fallback to domain (but clean it up)
+        domain_name = domain.split('.')[0].replace('-', ' ').replace('_', ' ')
+        return domain_name.title() if len(domain_name) > 2 else domain
 
     def extract_all_emails(self, soup: BeautifulSoup, text: str) -> List[str]:
         """Extract all valid business emails from the page."""

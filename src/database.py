@@ -165,6 +165,21 @@ async def init_db():
         except Exception:
             pass
         
+        # Add WHOIS confidence columns (v2.0 migration)
+        whois_columns = [
+            ('whois_confidence_score', 'REAL'),
+            ('whois_source', 'TEXT'),
+            ('whois_last_verified', 'TIMESTAMP'),
+            ('registrar', 'TEXT'),
+            ('domain_created_date', 'TEXT'),
+            ('domain_expiry_date', 'TEXT'),
+        ]
+        for col_name, col_type in whois_columns:
+            try:
+                await db.execute(f"ALTER TABLE legal_entities ADD COLUMN {col_name} {col_type}")
+            except Exception:
+                pass
+        
         # Index for faster queue lookup
         await db.execute("CREATE INDEX IF NOT EXISTS idx_queue_status ON queue(status)")
         await db.commit()

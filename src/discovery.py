@@ -25,10 +25,22 @@ SKIP_SUBDOMAIN_PREFIXES = {
     "p", "api", "cdn", "static", "assets", "open", "rss", "ftp", "webmail"
 }
 
+# Non-commercial domain patterns (universities, government, etc.)
+NON_COMMERCIAL_PATTERNS = [
+    '.ac.at',      # Austrian universities
+    '.ac.uk',      # UK universities  
+    '.edu',        # US education
+    '.gv.at',      # Austrian government
+    '.gov.',       # Government sites
+    'uni-',        # German universities
+    'university',  # University sites
+    'hochschule',  # German higher education
+]
+
 def should_skip_domain(domain: str) -> bool:
     """
-    Filters out noisy/non-HTML domains before queueing.
-    Drops service subdomains (mail, api, cdn, dns, etc.).
+    Filters out noisy/non-HTML domains and non-commercial entities.
+    Drops service subdomains, universities, government sites.
     """
     if not domain:
         return True
@@ -41,6 +53,12 @@ def should_skip_domain(domain: str) -> bool:
         sub = parts[0]
         if sub in SKIP_SUBDOMAIN_PREFIXES:
             return True
+    
+    # Skip non-commercial domains (universities, government, etc.)
+    for pattern in NON_COMMERCIAL_PATTERNS:
+        if pattern in d:
+            return True
+            
     return False
 
 def setup_data_dir():
@@ -562,16 +580,51 @@ async def ingest_targeted_search(tld: str, limit: int = 100):
     """
     Targeted SMB discovery using specific legal page dorks.
     Finds companies that might not be in top lists but have legal requirements.
+    Enhanced with diverse SMB-focused dorks (Issue #2 compliance).
     """
     suffix = tld.lstrip(".") if tld and tld not in (None, "", "*", "all", "any") else "de"
     
-    # Dorks to find legal pages directly
+    # Comprehensive SMB dorks covering different business types
     dorks = [
+        # Legal pages with company forms
         f'site:.{suffix} "Impressum" "GmbH" -site:facebook.com -site:youtube.com -site:linkedin.com',
         f'site:.{suffix} "Kontakt" "Geschäftsführer" -site:facebook.com',
         f'site:.{suffix} "Rechtliche Hinweise" "HRB" -site:amazon.{suffix}',
-        f'site:.{suffix} "Impressum" "Handwerk" -site:wikipedia.org',
+        
+        # Small business / sole proprietors
         f'site:.{suffix} "Impressum" "Einzelunternehmen"',
+        f'site:.{suffix} "Impressum" "Freiberufler"',
+        f'site:.{suffix} "Impressum" "Selbstständig"',
+        f'site:.{suffix} "Impressum" "Inhaber"',
+        
+        # Trades and crafts
+        f'site:.{suffix} "Impressum" "Handwerksbetrieb"',
+        f'site:.{suffix} "Impressum" "Meisterbetrieb"',
+        f'site:.{suffix} "Handwerker" "Kontakt"',
+        f'site:.{suffix} "Tischlerei" OR "Schreinerei" "Impressum"',
+        f'site:.{suffix} "Elektroinstallation" "Impressum"',
+        f'site:.{suffix} "Sanitär" "Heizung" "Impressum"',
+        
+        # Small retail / local shops
+        f'site:.{suffix} "Impressum" "Laden" OR "Geschäft"',
+        f'site:.{suffix} "Fachgeschäft" "Impressum"',
+        
+        # Small professional services
+        f'site:.{suffix} "Impressum" "Rechtsanwalt" OR "Steuerberater"',
+        f'site:.{suffix} "Impressum" "Architekturbüro" OR "Ingenieurbüro"',
+        f'site:.{suffix} "Praxis" "Impressum" -klinik -krankenhaus',
+        
+        # Small UG companies (startups)
+        f'site:.{suffix} "Impressum" "UG (haftungsbeschränkt)"',
+        f'site:.{suffix} "Impressum" "UG" "Gründer"',
+        
+        # Regional / local businesses
+        f'site:.{suffix} "Impressum" "regional" OR "lokal"',
+        f'site:.{suffix} "Familienbetrieb" "Impressum"',
+        
+        # GbR partnerships
+        f'site:.{suffix} "Impressum" "GbR"',
+        f'site:.{suffix} "Gesellschaft bürgerlichen Rechts" "Kontakt"',
     ]
     
     logger.info(f"Running targeted SMB search for TLD: {suffix} (limit={limit})")
@@ -581,18 +634,27 @@ async def ingest_targeted_search(tld: str, limit: int = 100):
     }
 
     total_found = 0
+    consecutive_failures = 0
+    MAX_CONSECUTIVE_FAILURES = 3  # Stop after 3 consecutive failures (rate limited)
     
     # Global Giant Blacklist (Skip these if found in search)
-    # These are huge platforms that clutter results and aren't the SMBs we want
     GIANT_BLACKLIST = {
         "facebook.com", "linkedin.com", "youtube.com", "twitter.com", "instagram.com",
         "amazon.com", "amazon.de", "ebay.com", "ebay.de", "wikipedia.org",
         "yelp.com", "tripadvisor.com", "xing.com", "kununu.com"
     }
 
-    async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
-        for dork in dorks:
+    # Only try first 5 dorks to avoid excessive timeouts
+    dorks_to_try = dorks[:5]
+
+    async with httpx.AsyncClient(timeout=10, follow_redirects=True) as client:  # Reduced timeout
+        for dork in dorks_to_try:
             if total_found >= limit:
+                break
+            
+            # Early exit if rate limited
+            if consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
+                logger.warning(f"Search engine appears rate-limited after {consecutive_failures} failures. Skipping remaining dorks.")
                 break
                 
             try:
@@ -642,12 +704,16 @@ async def ingest_targeted_search(tld: str, limit: int = 100):
                 if batch:
                     await insert_domains(batch)
                     logger.info(f"Found {len(batch)} domains with dork: {dork}")
+                    consecutive_failures = 0  # Reset on success
+                else:
+                    consecutive_failures += 1
                     
                 # Be nice to the search engine
-                await asyncio.sleep(2)
+                await asyncio.sleep(1)
 
             except Exception as e:
-                logger.error(f"Targeted search error for {dork}: {e}")
+                consecutive_failures += 1
+                logger.warning(f"Targeted search failed ({consecutive_failures}/{MAX_CONSECUTIVE_FAILURES}): {str(e)[:50]}")
 
 async def run_discovery(tld: str, limit: int = 100, company_size: str = "all"):
     """
@@ -660,19 +726,27 @@ async def run_discovery(tld: str, limit: int = 100, company_size: str = "all"):
     logger.info(f"=== Starting discovery for TLD: {tld or 'ANY'}, limit: {limit}, size: {company_size} ===")
 
     if company_size == "smb":
-        # 1. Targeted Search (High Priority for SMB)
-        await ingest_targeted_search(tld, limit)
+        # SMB Mode: Focus on finding real small businesses, not top 1M domains
+        logger.info("=== SMB Mode: Prioritizing small business discovery ===")
         
-        # 2. Search Engine Fallbacks
-        search_limit = limit
-        await ingest_search_engine_domains(tld, search_limit)
-        await ingest_bing_search(tld, search_limit)
+        # 1. Certificate Transparency - MOST RELIABLE for finding real SMB domains
+        logger.info("Step 1/4: Certificate Transparency (crt.sh)...")
+        await ingest_crtsh_domains(tld, limit)
         
-        # 3. Common Crawl Fallback (Critical for when search engines block)
-        await ingest_common_crawl_domains(tld, limit=min(limit, 50))
+        # 2. Common Crawl - RELIABLE archive of real websites
+        logger.info("Step 2/4: Common Crawl archive...")
+        await ingest_common_crawl_domains(tld, limit=min(limit, 100))
         
-        # 4. Skip Top 1M lists for SMB mode
-        logger.info("Skipping Top 1M lists for SMB mode")
+        # 3. Wayback Machine (historical domains often include SMBs)
+        logger.info("Step 3/4: Wayback Machine...")
+        await ingest_wayback_domains(tld, limit // 2)
+        
+        # 4. Targeted Search (may be rate-limited, try with fewer dorks)
+        logger.info("Step 4/4: Targeted search (may be slow if rate-limited)...")
+        await ingest_targeted_search(tld, limit // 2)
+        
+        # Skip Top 1M lists for SMB mode (they're dominated by enterprises)
+        logger.info("Skipping Top 1M lists for SMB mode (enterprise-dominated)")
         
     elif company_size == "enterprise":
         # Prioritize lists

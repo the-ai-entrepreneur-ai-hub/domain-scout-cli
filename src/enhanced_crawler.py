@@ -5,6 +5,8 @@ import asyncio
 import uuid
 import json
 import random
+import re
+from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional
 from urllib.parse import urljoin, urlparse
@@ -24,10 +26,13 @@ from tenacity import retry, stop_after_attempt, wait_exponential
 from .database import get_pending_domains, update_domain_status, DB_PATH
 from .dns_checker import DNSChecker
 from .enhanced_extractor import EnhancedExtractor
-from .legal_extractor import LegalExtractor
+from .robust_legal_extractor import RobustLegalExtractor
+from .legal_extractor import LegalExtractor  # Keep for --legacy-extractor flag
+from .context_extractor import context_extractor  # NEW: Enhanced context-aware extraction
 from .link_discoverer import LinkDiscoverer
 from .llm_extractor import LLMExtractor
 from .whois_enricher import WhoisEnricher
+from .terminal_ui import get_ui, TerminalUI
 from .utils import logger, load_settings
 
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"
@@ -36,7 +41,8 @@ class EnhancedCrawler:
     def __init__(self, concurrency: int = 5, use_playwright: bool = True, limit: int = 0,
                  use_llm: bool = False, llm_provider: str = "ollama/deepseek-r1:7b",
                  llm_api_base: str = "http://localhost:11434", ignore_robots: bool = False,
-                 tld_filter: Optional[str] = None):
+                 tld_filter: Optional[str] = None, legacy_extractor: bool = False,
+                 enhanced_extraction: bool = True):
         if not CRAWL4AI_AVAILABLE:
             raise ImportError("Crawl4AI is not installed. Please run: pip install crawl4ai")
 
@@ -45,6 +51,8 @@ class EnhancedCrawler:
         self.use_llm = use_llm
         self.ignore_robots = ignore_robots
         self.tld_filter = tld_filter
+        self.legacy_extractor = legacy_extractor
+        self.enhanced_extraction = enhanced_extraction
         self.run_id = str(uuid.uuid4())  # Unique ID for this crawl session
         logger.info(f"Initialized EnhancedCrawler with Run ID: {self.run_id}")
         if limit > 0:
@@ -54,10 +62,22 @@ class EnhancedCrawler:
 
         self.dns_checker = DNSChecker()
         self.extractor = EnhancedExtractor()
-        self.legal_extractor = LegalExtractor()
+        
+        # Use RobustLegalExtractor by default (Gold Pipeline: JSON-LD first, no GLiNER)
+        # Fall back to old LegalExtractor with --legacy-extractor flag
+        if legacy_extractor:
+            logger.warning("Using LEGACY LegalExtractor (GLiNER-based). Consider removing --legacy-extractor flag.")
+            self.legal_extractor = LegalExtractor()
+        else:
+            logger.info("Using RobustLegalExtractor (JSON-LD first, country-specific patterns)")
+            self.legal_extractor = RobustLegalExtractor()
+        
         self.link_discoverer = LinkDiscoverer()
         self.whois_enricher = WhoisEnricher()
         self.settings = load_settings()
+        
+        # Initialize Terminal UI
+        self.ui = get_ui()
         
         # Initialize Session Stats (Not Global)
         self.session_stats = {
@@ -100,6 +120,170 @@ class EnhancedCrawler:
                     logger.info(f"Blacklist loaded/updated ({len(self.blacklist)} domains)")
             except Exception as e:
                 logger.error(f"Error reloading blacklist: {e}")
+
+    def _normalize_legal_data(self, legal_data: Dict) -> Dict:
+        """
+        Normalize RobustLegalExtractor output to match save_results expected format.
+        Maps: street_address → registered_street, postal_code → registered_zip, etc.
+        """
+        if not legal_data:
+            return legal_data
+        
+        # If using legacy extractor, data is already in correct format
+        if self.legacy_extractor:
+            return legal_data
+        
+        # Map RobustLegalExtractor fields to expected format
+        normalized = legal_data.copy()
+        
+        # Address mapping (multiple source field names)
+        if 'street_address' in legal_data and not legal_data.get('registered_street'):
+            normalized['registered_street'] = legal_data.get('street_address', '')
+        if 'street' in legal_data and not normalized.get('registered_street'):
+            normalized['registered_street'] = legal_data.get('street', '')
+            
+        if 'postal_code' in legal_data and not legal_data.get('registered_zip'):
+            normalized['registered_zip'] = legal_data.get('postal_code', '')
+        if 'city' in legal_data and not legal_data.get('registered_city'):
+            normalized['registered_city'] = legal_data.get('city', '')
+        if 'country' in legal_data and not legal_data.get('registered_country'):
+            normalized['registered_country'] = legal_data.get('country', '')
+        
+        # CEO mapping - handle multiple field names
+        if 'ceo' in legal_data and not legal_data.get('ceo_name'):
+            normalized['ceo_name'] = legal_data.get('ceo', '')
+        if 'ceo_name' in legal_data:
+            normalized['ceo_name'] = legal_data.get('ceo_name', '')
+            
+        # Directors mapping - convert string to list if needed
+        if 'directors' in legal_data:
+            directors = legal_data.get('directors', '')
+            if isinstance(directors, str) and directors:
+                # Convert semicolon-separated string to list
+                normalized['directors'] = [d.strip() for d in directors.split(';') if d.strip()]
+            elif isinstance(directors, list):
+                normalized['directors'] = directors
+            else:
+                normalized['directors'] = []
+        
+        # Contact mapping
+        if 'phone' in legal_data and not legal_data.get('legal_phone'):
+            normalized['legal_phone'] = legal_data.get('phone', '')
+        if 'email' in legal_data and not legal_data.get('legal_email'):
+            normalized['legal_email'] = legal_data.get('email', '')
+        
+        # Confidence mapping
+        if 'extraction_confidence' in legal_data and 'confidence' not in legal_data:
+            normalized['confidence'] = legal_data.get('extraction_confidence', 0)
+        
+        # Status: RobustLegalExtractor always returns data, mark as SUCCESS if we have legal_name
+        if legal_data.get('legal_name') and 'status' not in legal_data:
+            normalized['status'] = 'SUCCESS'
+        elif not legal_data.get('status'):
+            normalized['status'] = 'NO_DATA'
+        
+        return normalized
+
+    async def _extract_legal_enhanced(self, domain: str, html: str, url: str, 
+                                       crawler: AsyncWebCrawler, markdown: str = None) -> tuple:
+        """
+        Enhanced legal extraction using 5-step workflow:
+        1. Find legal page URLs from homepage
+        2. Navigate to legal page
+        3. Clean content with Trafilatura (or use markdown for SPAs)
+        4. Detect country context
+        5. Extract with country-specific patterns
+        """
+        from .content_cleaner import content_cleaner
+        from .legal_navigation import legal_navigator
+        
+        metadata = {'domain': domain, 'source_url': url, 'method': 'enhanced'}
+        
+        try:
+            # Step 1-2: Find and fetch legal page (if not already on one)
+            is_legal_page = any(kw in url.lower() for kw in ['impressum', 'legal', 'kontakt', 'contact'])
+            
+            if not is_legal_page:
+                # Find legal page URLs from homepage
+                legal_urls = legal_navigator.find_legal_notice_urls(domain, html)
+                metadata['legal_urls_found'] = len(legal_urls)
+                
+                # Try to fetch first legal page
+                for legal_url in legal_urls[:3]:
+                    try:
+                        res = await crawler.arun(url=legal_url, headers={'User-Agent': USER_AGENT})
+                        if res and res.html and len(res.html) > 500:
+                            html = res.html
+                            # Prefer markdown for SPAs (contains rendered JS content)
+                            markdown = res.markdown if hasattr(res, 'markdown') else None
+                            url = legal_url
+                            metadata['navigated_to'] = legal_url
+                            break
+                    except:
+                        continue
+            
+            # Step 3: Clean content - prefer markdown (for SPAs) over raw HTML
+            # Markdown contains JavaScript-rendered content that Trafilatura can't see
+            if markdown and len(markdown) > 200:
+                clean_text = markdown
+                metadata['content_source'] = 'markdown'
+            else:
+                clean_text = content_cleaner.extract_clean_content(html, url)
+                metadata['content_source'] = 'trafilatura'
+            metadata['clean_text_length'] = len(clean_text) if clean_text else 0
+            
+            if not clean_text or len(clean_text) < 50:
+                return {'status': 'NO_DATA'}, metadata
+            
+            # Step 4-5: Country detection + extraction
+            # Detect country from domain TLD
+            country_hint = None
+            domain_lower = domain.lower()
+            if domain_lower.endswith('.at'):
+                country_hint = 'austrian'
+            elif domain_lower.endswith('.de'):
+                country_hint = 'german'
+            elif domain_lower.endswith(('.co.uk', '.uk')):
+                country_hint = 'uk'
+            
+            extracted = context_extractor.extract_from_clean_text(clean_text, country_hint)
+            metadata['country_hint'] = country_hint
+            
+            # DEBUG: Log extraction results
+            logger.info(f"DEBUG extraction for {domain}: {len(extracted) if extracted else 0} fields, legal_name={extracted.get('legal_name', 'NONE')[:30] if extracted else 'NONE'}")
+            
+            if extracted:
+                extracted['status'] = 'SUCCESS'
+                metadata['fields_found'] = len(extracted)
+                
+                # Ensure field names match database expectations
+                # Map directors string to list
+                if 'directors' in extracted and isinstance(extracted['directors'], str):
+                    extracted['directors'] = [d.strip() for d in extracted['directors'].split(';') if d.strip()]
+                
+                # Map address fields to registered_* format
+                if 'street' in extracted and 'registered_street' not in extracted:
+                    extracted['registered_street'] = extracted.pop('street', '')
+                if 'city' in extracted and 'registered_city' not in extracted:
+                    extracted['registered_city'] = extracted.pop('city', '')
+                if 'postal_code' in extracted and 'registered_zip' not in extracted:
+                    extracted['registered_zip'] = extracted.pop('postal_code', '')
+                if 'country' in extracted and 'registered_country' not in extracted:
+                    extracted['registered_country'] = extracted.pop('country', '')
+                    
+                # Ensure legal_name is set for SUCCESS status
+                if not extracted.get('legal_name') and extracted.get('ceo_name'):
+                    # Try to infer company name from CEO if possible
+                    pass  # Will rely on main extractor for company name
+            else:
+                extracted = {'status': 'NO_DATA'}
+                
+            return extracted, metadata
+            
+        except Exception as e:
+            logger.error(f"Enhanced extraction failed for {domain}: {e}")
+            metadata['error'] = str(e)
+            return {'status': 'ERROR'}, metadata
 
     async def process_domain(self, domain_row, crawler: AsyncWebCrawler):
         """Process a single domain using the provided crawler instance."""
@@ -248,10 +432,19 @@ class EnhancedCrawler:
             
             # 5.5 WHOIS Enrichment (The "Hybrid Truth" Strategy)
             # Always fetch WHOIS to separate Website Operator vs Domain Registrant
-            whois_data = self.whois_enricher.get_whois_data(domain)
+            # Use async version which tries RDAP first for better reliability
+            whois_data = await self.whois_enricher.get_whois_data_async(domain)
             
             # Merge WHOIS data into legal_info for storage
+            # IMPORTANT: Don't overwrite status or legal_name from website extraction
+            preserved_status = legal_info.get('status')
+            preserved_legal_name = legal_info.get('legal_name')
             legal_info.update(whois_data)
+            # Restore preserved fields
+            if preserved_status:
+                legal_info['status'] = preserved_status
+            if preserved_legal_name:
+                legal_info['legal_name'] = preserved_legal_name
             
             # Smart Fill: If website data is missing, fallback to WHOIS
             if not legal_info.get('legal_name') and whois_data.get('registrant_name'):
@@ -272,6 +465,9 @@ class EnhancedCrawler:
                     enriched_data['address'] = ", ".join(parts)
             
             # 6. Save to database with RUN_ID
+            # DEBUG: Before save
+            logger.info(f"DEBUG SAVE: domain={domain}, legal_info keys={list(legal_info.keys()) if legal_info else 'NONE'}, legal_name={legal_info.get('legal_name', 'NONE')[:30] if legal_info and legal_info.get('legal_name') else 'NONE'}, status={legal_info.get('status') if legal_info else 'NONE'}")
+            
             await self.save_results(domain, enriched_data, legal_info)
             
             await update_domain_status(domain_id, "COMPLETED")
@@ -291,7 +487,7 @@ class EnhancedCrawler:
                 if 'enriched_data' not in locals(): enriched_data = data if 'data' in locals() else {}
                 if 'legal_info' not in locals(): legal_info = {}
                 
-                whois_data = self.whois_enricher.get_whois_data(domain)
+                whois_data = await self.whois_enricher.get_whois_data_async(domain)
                 legal_info.update(whois_data)
                 
                 if not legal_info.get('legal_name') and whois_data.get('registrant_name'):
@@ -315,9 +511,10 @@ class EnhancedCrawler:
         """
         Fallback handler: Fetches WHOIS data when website crawl fails.
         Saves partial result and marks success if WHOIS data found.
+        Uses RDAP first for better reliability, falls back to WHOIS.
         """
         try:
-            whois_data = self.whois_enricher.get_whois_data(domain)
+            whois_data = await self.whois_enricher.get_whois_data_async(domain)
             
             # Prepare partial data structure
             legal_info = whois_data.copy()
@@ -448,7 +645,23 @@ class EnhancedCrawler:
             page_data = self.extractor.extract(html, initial_data['domain'], page_url)
             
             # Extract legal data (specialized)
-            legal_data = self.legal_extractor.extract(html, page_url)
+            if self.enhanced_extraction:
+                # Use NEW enhanced context-aware extraction workflow
+                # Pass markdown for SPA sites (contains JS-rendered content)
+                markdown = res.markdown if hasattr(res, 'markdown') else None
+                legal_data, extraction_metadata = await self._extract_legal_enhanced(
+                    initial_data['domain'], html, page_url, crawler, markdown
+                )
+                legal_data = self._normalize_legal_data(legal_data)
+                # Add metadata to track extraction quality
+                legal_data.update({
+                    'extraction_metadata': extraction_metadata,
+                    'extraction_method': 'enhanced_context_aware'
+                })
+            else:
+                # Use existing legal extractor
+                legal_data = self.legal_extractor.extract(html, page_url)
+                legal_data = self._normalize_legal_data(legal_data)
             
             # Use LLM for legal pages if enabled
             is_legal_url = any(kw in page_url.lower() for kw in ['impressum', 'legal', 'imprint'])
@@ -462,9 +675,35 @@ class EnhancedCrawler:
                     legal_data['status'] = 'SUCCESS'  # Mark as success since LLM found data
                     logger.info(f"LLM extraction successful for {page_url}")
             
+            # DEBUG: Check status
+            logger.info(f"DEBUG legal_data status={legal_data.get('status')}, legal_name={legal_data.get('legal_name', 'NONE')[:30] if legal_data.get('legal_name') else 'NONE'}")
+            
             if legal_data.get('status') == 'SUCCESS':
-                # We found specific legal info!
-                merged_data['legal_info'] = legal_data
+                # Merge legal info - keep best values from all pages
+                existing = merged_data.get('legal_info', {})
+                key_fields = ['legal_name', 'legal_form', 'registration_number', 'ceo_name', 'directors', 
+                              'registered_street', 'registered_city', 'registered_zip', 'phone', 'email', 'vat_id']
+                
+                # Count fields in each
+                existing_count = sum(1 for f in key_fields if existing.get(f))
+                new_count = sum(1 for f in key_fields if legal_data.get(f))
+                
+                if new_count > existing_count:
+                    # New extraction is better - use it but preserve existing non-empty fields
+                    for f in key_fields:
+                        if not legal_data.get(f) and existing.get(f):
+                            legal_data[f] = existing[f]
+                    merged_data['legal_info'] = legal_data
+                    logger.info(f"DEBUG: Updated legal_info with {new_count} fields (was {existing_count})")
+                elif existing_count > 0:
+                    # Keep existing, but fill in any missing fields from new
+                    for f in key_fields:
+                        if not existing.get(f) and legal_data.get(f):
+                            existing[f] = legal_data[f]
+                    merged_data['legal_info'] = existing
+                else:
+                    merged_data['legal_info'] = legal_data
+                    logger.info(f"DEBUG: Setting initial legal_info with {new_count} fields")
                 
             # Merge generic data
             for key, value in page_data.items():
@@ -485,8 +724,94 @@ class EnhancedCrawler:
         merged_data['confidence_score'] = self.extractor.calculate_confidence_score(merged_data)
         return merged_data
 
+    # Known garbage CEO/person names
+    GARBAGE_NAMES = {
+        'nginx', 'apache', 'wordpress', 'cloudflare', 'google', 'microsoft',
+        'server', 'hosting', 'domain', 'admin', 'webmaster', 'root', 'user',
+        'wir', 'uns', 'sie', 'ihr', 'du', 'we', 'you', 'they', 'us',
+        'kontakt', 'contact', 'impressum', 'legal', 'info', 'support',
+        'kunden', 'customer', 'service', 'team', 'staff', 'management',
+    }
+    
+    def validate_before_save(self, domain: str, data: dict, legal_info: dict) -> tuple:
+        """
+        Validate and clean data before saving to prevent garbage.
+        Returns (cleaned_data, cleaned_legal_info).
+        """
+        # Validate company name
+        company_name = data.get('company_name', '')
+        if company_name:
+            # Basic garbage detection
+            garbage_patterns = [
+                r'\d{4}',  # Years
+                r'https?://',  # URLs
+                r'\(\d+\)',  # Cart counts
+                r'cookie|newsletter|warenkorb|anmelden',  # UI elements
+            ]
+            name_lower = company_name.lower()
+            for pattern in garbage_patterns:
+                if re.search(pattern, name_lower):
+                    logger.debug(f"Rejected garbage company name: {company_name}")
+                    data['company_name'] = domain.split('.')[0].title()  # Fallback to domain
+                    break
+            
+            # Length check
+            if len(company_name) > 100 or len(company_name) < 2:
+                data['company_name'] = domain.split('.')[0].title()
+        
+        # Validate legal info
+        if legal_info:
+            legal_name = legal_info.get('legal_name', '')
+            if legal_name:
+                if len(legal_name) > 100 or len(legal_name) < 2:
+                    legal_info['legal_name'] = ''
+                    
+                # Check for garbage
+                garbage = ['navigation', 'menu', 'cookie', 'newsletter', r'\d{4}']
+                for g in garbage:
+                    if re.search(g, legal_name.lower()):
+                        legal_info['legal_name'] = ''
+                        break
+            
+            # Validate CEO name - reject garbage
+            ceo = legal_info.get('ceo_name') or legal_info.get('ceo', '')
+            if ceo:
+                if ceo.lower().strip() in self.GARBAGE_NAMES or len(ceo) < 3:
+                    legal_info['ceo_name'] = ''
+                    legal_info['ceo'] = ''
+            
+            # Validate directors - filter garbage
+            directors = legal_info.get('directors', [])
+            if directors and isinstance(directors, list):
+                legal_info['directors'] = [
+                    d for d in directors 
+                    if d.lower().strip() not in self.GARBAGE_NAMES and len(d) >= 3
+                ]
+            
+            # Validate street address - check for multi-line garbage
+            street = legal_info.get('registered_street', '')
+            if street:
+                # Check for newlines (multi-line garbage)
+                if '\n' in street or len(street) > 100 or len(street) < 5:
+                    legal_info['registered_street'] = ''
+                elif any(x in street.lower() for x in ['http', '@', 'gmbh', 'geschäftsführer', 'kontaktieren']):
+                    legal_info['registered_street'] = ''
+            
+            # Validate city
+            city = legal_info.get('registered_city', '')
+            if city:
+                if len(city) > 50 or len(city) < 2:
+                    legal_info['registered_city'] = ''
+                elif any(x in city.lower() for x in ['tel', 'fax', 'http', 'email']):
+                    legal_info['registered_city'] = ''
+        
+        return data, legal_info
+
     async def save_results(self, domain, data, legal_info):
         """Save results to DB with run_id."""
+        # Validate and clean before saving
+        data, legal_info = self.validate_before_save(domain, data, legal_info or {})
+        
         async with aiosqlite.connect(DB_PATH, timeout=60.0) as db:
             # Save Enhanced Results
             emails_str = ','.join(data.get('emails', []))
@@ -528,7 +853,12 @@ class EnhancedCrawler:
             ))
             
             # Save Legal Entities if available
-            if legal_info and (legal_info.get('status') == 'SUCCESS' or legal_info.get('extraction_method') == 'whois_fallback'):
+            # Save legal entities if we have legal extraction OR WHOIS data
+            has_legal_data = legal_info.get('status') == 'SUCCESS'
+            has_whois_fallback = legal_info.get('extraction_method') == 'whois_fallback'
+            has_whois_data = legal_info.get('source') in ('rdap', 'whois', 'rdap+whois')
+            
+            if legal_info and (has_legal_data or has_whois_fallback or has_whois_data):
                 directors_json = json.dumps(legal_info.get('directors', []))
                 auth_reps_json = json.dumps(legal_info.get('authorized_reps', []))
                 
@@ -579,12 +909,14 @@ class EnhancedCrawler:
                      dpo_name, dpo_email,
                      phone, email,
                      registrant_name, registrant_address, registrant_city, registrant_zip, registrant_country, registrant_email, registrant_phone,
+                     whois_confidence_score, whois_source, whois_last_verified, registrar, domain_created_date, domain_expiry_date,
                      legal_notice_url, extraction_confidence, run_id)
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                             ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 
                             ?, ?, ?, ?,
                             ?, ?, ?, ?, ?, ?, ?,
                             ?, ?, ?, ?, ?, ?, ?,
+                            ?, ?, ?, ?, ?, ?,
                             ?, ?, ?)
                 """, (
                     domain,
@@ -629,6 +961,12 @@ class EnhancedCrawler:
                     reg_country,
                     reg_email,
                     reg_phone,
+                    legal_info.get('whois_confidence', 0.0),
+                    legal_info.get('source', ''),
+                    datetime.now().isoformat() if legal_info.get('source') else None,
+                    legal_info.get('registrar', ''),
+                    legal_info.get('created_date', ''),
+                    legal_info.get('expiry_date', ''),
                     legal_info.get('legal_notice_url', ''),
                     legal_info.get('confidence', 0),
                     self.run_id
@@ -686,8 +1024,10 @@ class EnhancedCrawler:
                 await asyncio.sleep(5) # Cool down before restarting worker loop
 
     async def run(self):
-        logger.info(f"Starting Crawl Run {self.run_id} with {self.concurrency} workers.")
-        logger.info(f"Press Ctrl+C or create STOP file to stop and export results.")
+        # Show banner
+        self.ui.banner()
+        self.ui.log(f"Run ID: {self.run_id} | Workers: {self.concurrency}", "info")
+        self.ui.log("Press Ctrl+C or create STOP file to stop and export results.", "info")
         
         # Get total pending count for progress tracking
         async with aiosqlite.connect(DB_PATH, timeout=60.0) as db:
@@ -754,24 +1094,10 @@ class EnhancedCrawler:
             progress_task.cancel()
             for w in workers: w.cancel()
             
-            # Final stats
-            elapsed = asyncio.get_event_loop().time() - self.stats['start_time']
-            
-            logger.info(f"")
-            logger.info(f"=" * 60)
-            logger.info(f"  CRAWL FINISHED")
-            logger.info(f"=" * 60)
-            logger.info(f"  Run ID:      {self.run_id}")
-            logger.info(f"  Processed:   {self.session_stats['processed']}")
-            logger.info(f"  Successful:  {self.session_stats['success']}")
-            logger.info(f"  Legal Found: {self.session_stats['legal_found']}")
-            logger.info(f"  Failed:      {self.session_stats['failed']}")
-            logger.info(f"  Time:        {elapsed/60:.1f} minutes")
-            logger.info(f"=" * 60)
-            logger.info(f"")
-            logger.info(f"  To export results, run:")
-            logger.info(f"  python main.py export --legal-only --run-id {self.run_id} --include-incomplete")
-            logger.info(f"")
+            # Final stats with Terminal UI
+            self.ui.final_report(self.session_stats)
+            self.ui.log(f"Run ID: {self.run_id}", "info")
+            self.ui.log(f"Export: python main.py export --run-id {self.run_id}", "info")
 
     async def _progress_reporter(self):
         """Report progress every 30 seconds."""
@@ -810,11 +1136,10 @@ class EnhancedCrawler:
             counts.get('PARTIAL_FETCH', 0)
         )
         
-        logger.info(f"")
-        logger.info(f"  [SESSION] Processed: {self.session_stats['processed']} | "
-                   f"Success: {self.session_stats['success']} | "
-                   f"Failed: {self.session_stats['failed']} | "
-                   f"Legal Found: {self.session_stats['legal_found']} | "
-                   f"Rate: {session_rate:.1f}/min")
-        logger.info(f"  [GLOBAL]  Total Completed: {total_success} | "
-                   f"Total Pending: {pending}")
+        # Use terminal UI for progress
+        self.ui.stats(
+            self.session_stats['processed'],
+            self.session_stats['success'],
+            self.session_stats['failed'],
+            self.session_stats['legal_found']
+        )

@@ -43,18 +43,20 @@ async def async_main():
     crawl_parser.add_argument("--llm-provider", default="ollama/deepseek-r1:7b", help="LLM provider string")
     crawl_parser.add_argument("--llm-api-base", default="http://localhost:11434", help="Ollama API base URL")
     crawl_parser.add_argument("--ignore-robots", action="store_true", help="Ignore robots.txt rules (CAUTION: May get banned)")
+    crawl_parser.add_argument("--legacy-extractor", action="store_true", help="Use legacy GLiNER-based extractor (not recommended)")
+    crawl_parser.add_argument("--no-enhanced", action="store_true", help="Disable enhanced extraction (legal page navigation + Trafilatura)")
 
-    # Export Command
-    export_parser = subparsers.add_parser('export', help='Export results to CSV')
+    # Export Command - UNIFIED format is now DEFAULT (Issue #3 compliance)
+    export_parser = subparsers.add_parser('export', help='Export results to CSV (unified 23-column format)')
     export_parser.add_argument("--output", help="Output file path (timestamp auto-added)")
     export_parser.add_argument("--tld", help="Filter by TLD")
-    export_parser.add_argument("--enhanced", action="store_true", help="Export enhanced results")
-    export_parser.add_argument("--json", action="store_true", help="Export as JSON instead of CSV")
-    export_parser.add_argument("--legal-only", action="store_true", help="Export only legal entity information")
-    export_parser.add_argument("--unified", action="store_true", help="Export unified results (Client Spec Compliance)")
     export_parser.add_argument("--run-id", help="Export data for a specific Run ID (use 'latest' for most recent run, defaults to ALL runs)")
-    export_parser.add_argument("--include-incomplete", action="store_true", 
-                               help="Include entries without full metadata (default: only export complete records)")
+    export_parser.add_argument("--complete-only", action="store_true", help="Export only entries with full details (company name + address)")
+    export_parser.add_argument("--client-spec", action="store_true", help="Export ONLY 6 required fields (name, legal form, address, reps, contact, register)")
+    export_parser.add_argument("--legacy", action="store_true", help="Use legacy export format (enhanced/legal separate files)")
+    export_parser.add_argument("--legacy-enhanced", action="store_true", help="Legacy: Export enhanced results only")
+    export_parser.add_argument("--legacy-legal", action="store_true", help="Legacy: Export legal entities only")
+    export_parser.add_argument("--json", action="store_true", help="Export as JSON instead of CSV (legacy mode only)")
     
     # Reset Command
     subparsers.add_parser('reset', help='Reset FAILED domains to PENDING')
@@ -98,7 +100,9 @@ async def async_main():
                 use_playwright=True,  # Default to True for auto-crawl
                 limit=args.crawl_limit,
                 use_llm=False, # Default to False for auto-crawl unless specified (future)
-                tld_filter=tld
+                tld_filter=tld,
+                legacy_extractor=False,  # Use gold RobustLegalExtractor by default
+                enhanced_extraction=True  # Use new 5-step workflow by default
             )
             await crawler.run()
         
@@ -113,7 +117,9 @@ async def async_main():
                 llm_provider=getattr(args, 'llm_provider', 'ollama/deepseek-r1:7b'),
                 llm_api_base=getattr(args, 'llm_api_base', 'http://localhost:11434'),
                 ignore_robots=getattr(args, 'ignore_robots', False),
-                tld_filter=getattr(args, 'tld', None)
+                tld_filter=getattr(args, 'tld', None),
+                legacy_extractor=getattr(args, 'legacy_extractor', False),
+                enhanced_extraction=not getattr(args, 'no_enhanced', False)
             )
             await crawler.run()
         else:
@@ -128,22 +134,38 @@ async def async_main():
              await crawler.run()
         
     elif args.task == 'export':
-        if getattr(args, 'legal_only', False):
+        # Default: Unified export (23-column Client Spec)
+        # Legacy modes are opt-in only
+        
+        use_legacy = getattr(args, 'legacy', False)
+        use_legacy_enhanced = getattr(args, 'legacy_enhanced', False)
+        use_legacy_legal = getattr(args, 'legacy_legal', False)
+        use_client_spec = getattr(args, 'client_spec', False)
+        
+        if use_client_spec:
+            # Client Spec: ONLY 6 required fields (14 columns)
+            from src.enhanced_storage import export_client_spec
+            result = await export_client_spec(args.output, args.tld, args.run_id)
+            if result:
+                logger.info(f"Client spec export complete: {result}")
+        elif use_legacy_legal:
+            # Legacy: Legal entities only
             from src.enhanced_storage import export_legal_entities_to_csv
-            full_metadata_only = not getattr(args, 'include_incomplete', False)
-            await export_legal_entities_to_csv(args.output, args.tld, args.run_id, full_metadata_only)
-        elif getattr(args, 'unified', False):
-            from src.enhanced_storage import export_unified
-            await export_unified(args.output, args.tld, args.run_id)
-        elif args.enhanced:
+            await export_legal_entities_to_csv(args.output, args.tld, args.run_id, True)
+        elif use_legacy_enhanced or use_legacy:
+            # Legacy: Enhanced results
             from src.enhanced_storage import export_enhanced_to_csv, export_enhanced_to_json
             if args.json:
                 await export_enhanced_to_json(args.output, args.tld, args.run_id)
             else:
                 await export_enhanced_to_csv(args.output, args.tld, True, args.run_id)
         else:
-            from src.storage import export_to_csv
-            await export_to_csv(args.output, args.tld)
+            # DEFAULT: Unified export (Client Spec Compliance - 23 columns)
+            from src.enhanced_storage import export_unified
+            complete_only = getattr(args, 'complete_only', False)
+            result = await export_unified(args.output, args.tld, args.run_id, complete_only)
+            if result:
+                logger.info(f"Unified export complete: {result}")
         
     elif args.task == 'reset':
         from src.reset_tool import reset_failed_domains

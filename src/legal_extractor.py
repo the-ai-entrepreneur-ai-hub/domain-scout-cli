@@ -23,6 +23,31 @@ except ImportError:
     logger.warning("GLiNER library not found. Falling back to regex-only extraction.")
 
 class LegalExtractor:
+    # Known false positive organization names (tech companies, services, etc.)
+    FALSE_POSITIVE_ORGS = {
+        'google', 'facebook', 'meta', 'microsoft', 'apple', 'amazon', 'twitter', 'x',
+        'linkedin', 'instagram', 'youtube', 'tiktok', 'whatsapp', 'telegram',
+        'nginx', 'apache', 'cloudflare', 'wordpress', 'jquery', 'bootstrap',
+        'analytics', 'adsense', 'adwords', 'recaptcha', 'captcha',
+        'cookie', 'cookies', 'gdpr', 'dsgvo', 'datenschutz', 'privacy',
+        'bundesagentur', 'bundesamt', 'ministerium', 'regierung',
+        'server', 'hosting', 'domain', 'ssl', 'https', 'http',
+        'contact', 'kontakt', 'impressum', 'imprint', 'legal',
+        'navigation', 'menu', 'header', 'footer', 'sidebar',
+    }
+    
+    # Third-party/partner section indicators to EXCLUDE
+    PARTNER_INDICATORS = [
+        'konzeption', 'gestaltung', 'programmierung', 'umsetzung', 'realisierung',
+        'design', 'agentur', 'webdesign', 'webentwicklung', 'technische umsetzung',
+        'partner', 'powered by', 'content management', 'cms', 'hosting',
+        'typo3', 'wordpress', 'drupal', 'joomla', 'contentful',
+        'bildnachweis', 'bildrechte', 'fotos', 'fotograf', 'fotografie',
+        'übersetzung', 'translation', 'lektorat',
+        'streitbeilegung', 'streitschlichtung', 'os-plattform', 'odr',
+        'copyright', 'urheberrecht', 'haftungsausschluss', 'disclaimer',
+    ]
+    
     def __init__(self):
         # Initialize Validator
         self.validator = DataValidator()
@@ -98,14 +123,19 @@ class LegalExtractor:
             'Delaware': re.compile(r'Delaware\s+(?:Corporation|Company)\s*(?:File\s*)?(?:Number|No\.?)?\s*[:.]?\s*(\d+)', re.IGNORECASE)
         }
         
-        # Multi-language patterns for key terms
+        # Multi-language patterns for key terms (more restrictive to avoid garbage)
         self.multilang_patterns = {
             'managing_director': {
-                'DE': [r'Geschäftsführer:?\s*([^,\n]+)', r'Vorstand:?\s*([^,\n]+)'],
-                'EN': [r'(?:Managing\s+)?Directors?:?\s*([^,\n]+)', r'CEO:?\s*([^,\n]+)'],
-                'FR': [r'Gérant:?\s*([^,\n]+)', r'Directeur\s+Général:?\s*([^,\n]+)'],
-                'IT': [r'Amministratore:?\s*([^,\n]+)', r'Direttore:?\s*([^,\n]+)'],
-                'ES': [r'Administrador:?\s*([^,\n]+)', r'Director\s+General:?\s*([^,\n]+)']
+                # Require colon or "ist" after title, then capture person name (First Last format)
+                'DE': [
+                    r'Geschäftsführer(?:in)?[:\s]+(?:ist\s+)?([A-ZÄÖÜ][a-zäöüß]+(?:\s+(?:von\s+|van\s+|de\s+)?[A-ZÄÖÜ][a-zäöüß\-]+)+)',
+                    r'Geschäftsführer(?:in)?[:\s]+(?:Herr|Frau)?\s*([A-ZÄÖÜ][a-zäöüß]+(?:\s+[A-ZÄÖÜ][a-zäöüß\-]+)+)',
+                    r'(?:^|\n)Geschäftsführer(?:in)?[:\s]+([A-ZÄÖÜ][a-zäöüß\.\-]+(?:\s+[A-ZÄÖÜ][a-zäöüß\.\-]+)+)',
+                ],
+                'EN': [r'(?:Managing\s+)?Director[s]?[:\s]+([A-Z][a-z]+(?:\s+[A-Z][a-z\-]+)+)', r'CEO[:\s]+([A-Z][a-z]+(?:\s+[A-Z][a-z\-]+)+)'],
+                'FR': [r'Gérant[:\s]+([A-Z][a-zéèêëàâäùûüôöîï]+(?:\s+[A-Z][a-zéèêëàâäùûüôöîï\-]+)+)'],
+                'IT': [r'Amministratore[:\s]+([A-Z][a-zìòàùè]+(?:\s+[A-Z][a-zìòàùè\-]+)+)'],
+                'ES': [r'Administrador[:\s]+([A-Z][a-záéíóúñ]+(?:\s+[A-Z][a-záéíóúñ\-]+)+)']
             },
             'authorized_rep': {
                 'DE': [r'Vertretungsberechtigte?r?:?\s*([^,\n]+)', r'Vertreten\s+durch:?\s*([^,\n]+)'],
@@ -155,6 +185,192 @@ class LegalExtractor:
             return detect(text[:1000])  # Use first 1000 chars for speed
         except:
             return 'en'  # Default to English
+
+    def isolate_impressum_section(self, soup: BeautifulSoup, url: str) -> Tuple[Optional[BeautifulSoup], str]:
+        """
+        Isolate the PRIMARY Impressum section, excluding partner/third-party info.
+        Returns (isolated_soup, isolated_text) or (None, full_text) if isolation fails.
+        """
+        # Remove nav, footer, header, aside, scripts first
+        for tag in soup.find_all(['nav', 'script', 'style', 'noscript', 'aside']):
+            tag.decompose()
+        
+        # Try to find Impressum section by ID or class
+        impressum_patterns = ['impressum', 'imprint', 'legal-notice', 'legal_notice', 'legalnotice']
+        impressum_section = None
+        
+        # 1. Look for main content area with impressum id/class
+        for pattern in impressum_patterns:
+            # Check by ID
+            section = soup.find(id=re.compile(pattern, re.IGNORECASE))
+            if section:
+                impressum_section = section
+                break
+            # Check by class
+            section = soup.find(class_=re.compile(pattern, re.IGNORECASE))
+            if section:
+                impressum_section = section
+                break
+        
+        # 2. Look for article or main tag
+        if not impressum_section:
+            main = soup.find('main') or soup.find('article')
+            if main:
+                impressum_section = main
+        
+        # 3. Look for div with main content classes
+        if not impressum_section:
+            for class_name in ['content', 'main-content', 'page-content', 'entry-content', 'post-content']:
+                section = soup.find('div', class_=re.compile(class_name, re.IGNORECASE))
+                if section:
+                    impressum_section = section
+                    break
+        
+        # 4. Find heading "Impressum" and extract content until next major section
+        if not impressum_section:
+            for h_tag in soup.find_all(['h1', 'h2', 'h3']):
+                if h_tag.get_text(strip=True).lower() in ['impressum', 'imprint', 'legal notice']:
+                    # Get parent container
+                    parent = h_tag.find_parent(['section', 'div', 'article'])
+                    if parent:
+                        impressum_section = parent
+                        break
+        
+        if not impressum_section:
+            # Fallback: return full content
+            full_text = soup.get_text(separator='\n', strip=True)
+            return None, full_text
+        
+        # Now filter OUT partner/third-party sections from the impressum
+        filtered_soup = BeautifulSoup(str(impressum_section), 'lxml')
+        
+        # Find and remove partner sections
+        for element in filtered_soup.find_all(['div', 'section', 'p', 'h2', 'h3', 'h4']):
+            element_text = element.get_text(strip=True).lower()
+            
+            # Check if this element starts a partner/third-party section
+            is_partner_section = False
+            for indicator in self.PARTNER_INDICATORS:
+                if indicator in element_text[:100]:  # Check first 100 chars
+                    is_partner_section = True
+                    break
+            
+            if is_partner_section:
+                # Remove this element and all following siblings until next major heading
+                element.decompose()
+        
+        # Extract the PRIMARY company info (usually first address block)
+        # Look for "Herausgeber" or "Angaben gemäß" or first address
+        primary_section = None
+        for heading in filtered_soup.find_all(['strong', 'b', 'h2', 'h3', 'p']):
+            heading_text = heading.get_text(strip=True).lower()
+            if any(kw in heading_text for kw in ['herausgeber', 'angaben gemäß', 'anbieter', 'betreiber', 'dienstanbieter']):
+                # This is the primary company section
+                parent = heading.find_parent(['div', 'section']) or heading.parent
+                if parent:
+                    primary_section = parent
+                    break
+        
+        # Get text from filtered soup
+        filtered_text = filtered_soup.get_text(separator='\n', strip=True)
+        
+        # If we found a primary section, prioritize its content
+        if primary_section:
+            primary_text = primary_section.get_text(separator='\n', strip=True)
+            # Prepend primary section to ensure it's processed first
+            filtered_text = primary_text + '\n' + filtered_text
+        
+        return filtered_soup, filtered_text
+
+    def extract_primary_company_block(self, text: str, domain: str) -> str:
+        """
+        Extract only the PRIMARY company information block from impressum text.
+        Less aggressive - only stops at CLEAR partner sections.
+        """
+        lines = text.split('\n')
+        primary_lines = []
+        in_partner_section = False
+        
+        # Only these indicate START of partner section (must be at line start)
+        partner_section_starts = [
+            r'^(?:konzeption|gestaltung|design|programmierung|umsetzung|realisierung)\s*(?:und|&|:|\s*$)',
+            r'^(?:technische\s+umsetzung|website\s+design|webdesign)',
+            r'^(?:powered\s+by|hosted\s+by|provided\s+by|ein\s+angebot\s+von)',
+            r'^(?:bildnachweis|bildrechte|fotos?:)',
+            r'^(?:online-?streitbeilegung|streitschlichtung|os-plattform)',
+            r'^(?:haftungsausschluss|disclaimer|copyright\s*©)',
+        ]
+        
+        for line in lines:
+            line_lower = line.lower().strip()
+            
+            # Skip empty lines at start
+            if not primary_lines and not line.strip():
+                continue
+            
+            # Check if this line STARTS a partner section
+            for pattern in partner_section_starts:
+                if re.match(pattern, line_lower):
+                    in_partner_section = True
+                    break
+            
+            if in_partner_section:
+                # Check if we're back to main content
+                main_content_patterns = [
+                    r'^(?:kontakt|adresse|anschrift|sitz|postanschrift)',
+                    r'^(?:telefon|tel\.|fax|e-mail|email)',
+                    r'^(?:geschäftsführer|vorstand|vertretungsberechtigter)',
+                    r'^(?:handelsregister|amtsgericht|hrb)',
+                ]
+                for pattern in main_content_patterns:
+                    if re.match(pattern, line_lower):
+                        in_partner_section = False
+                        break
+                
+                if in_partner_section:
+                    continue
+            
+            primary_lines.append(line)
+            
+            # Allow more lines for complete extraction
+            if len(primary_lines) > 60:
+                break
+        
+        return '\n'.join(primary_lines)
+
+    def validate_company_name_for_domain(self, company_name: str, domain: str) -> bool:
+        """
+        Validate that the company name is likely the PRIMARY company for this domain.
+        Returns True if the name seems related to the domain.
+        """
+        if not company_name or not domain:
+            return True  # Can't validate, assume OK
+        
+        # Extract domain words (without TLD)
+        domain_base = domain.lower().replace('www.', '')
+        domain_parts = re.split(r'[.-]', domain_base)
+        domain_words = [p for p in domain_parts if len(p) > 2 and p not in ['com', 'de', 'org', 'net', 'io', 'co']]
+        
+        company_lower = company_name.lower()
+        
+        # Check if any domain word appears in company name
+        for word in domain_words:
+            if word in company_lower:
+                return True
+        
+        # Check if company name contains common words that wouldn't match domain
+        # These are typically partner/agency companies
+        partner_words = ['agentur', 'agency', 'design', 'digital', 'media', 'studio', 'solutions', 'consulting']
+        for pw in partner_words:
+            if pw in company_lower and not any(pw in d for d in domain_words):
+                # Company has partner-type word not in domain - suspicious
+                return False
+        
+        # If company name has legal form and no domain match, still might be OK
+        legal_forms = ['gmbh', 'ag', 'kg', 'ug', 'ohg', 'ltd', 'inc', 'llc']
+        has_legal_form = any(lf in company_lower for lf in legal_forms)
+        
+        return has_legal_form  # If it has a legal form, probably a real company
 
     def extract_legal_form(self, text: str) -> Optional[str]:
         """Extract the legal form of the company."""
@@ -260,20 +476,98 @@ class LegalExtractor:
         
         return representatives
 
+    def validate_street(self, street: str) -> Optional[str]:
+        """Validate and clean street address. Returns None if invalid."""
+        if not street:
+            return None
+            
+        street = ' '.join(street.split()).strip()
+        
+        # Length checks
+        if len(street) < 5 or len(street) > 100:
+            return None
+            
+        # Must contain at least one letter
+        if not any(c.isalpha() for c in street):
+            return None
+            
+        # Reject if it's just a label
+        garbage_labels = [
+            'anschrift', 'adresse', 'sitz', 'standort', 'postanschrift', 
+            'address', 'location', 'registered office', 'contact',
+            'kontakt', 'telefon', 'email', 'fax', 'mobil'
+        ]
+        if street.lower().strip(' :.') in garbage_labels:
+            return None
+            
+        # Reject URLs
+        if 'http' in street.lower() or 'www.' in street.lower():
+            return None
+            
+        # Reject if contains common noise patterns
+        noise_patterns = [
+            r'@',  # Email
+            r'\d{4,}',  # Long numbers (phone-like)
+            r'gmbh|ag\b|ug\b|kg\b',  # Company forms in street
+            r'geschäftsführer|director|ceo',
+            r'registergericht|amtsgericht|hrb|hra',
+            r'cookie|newsletter|datenschutz',
+        ]
+        street_lower = street.lower()
+        for pattern in noise_patterns:
+            if re.search(pattern, street_lower):
+                return None
+                
+        return street
+        
+    def validate_city(self, city: str) -> Optional[str]:
+        """Validate city name. Returns None if invalid."""
+        if not city:
+            return None
+            
+        city = ' '.join(city.split()).strip()
+        
+        # Length checks
+        if len(city) < 2 or len(city) > 50:
+            return None
+            
+        # Should be mostly letters
+        letter_count = sum(1 for c in city if c.isalpha() or c in ' -')
+        if letter_count < len(city) * 0.7:
+            return None
+            
+        # Reject common garbage
+        garbage = ['tel', 'fax', 'email', 'phone', 'mobil', 'web', 'http', 'gmbh', 'ag']
+        if any(g in city.lower() for g in garbage):
+            return None
+            
+        # Limit to first 3 words max
+        words = city.split()[:3]
+        return ' '.join(words)
+
     def extract_addresses(self, soup: BeautifulSoup, text: str) -> Dict[str, Dict[str, str]]:
-        """Extract registered and postal addresses."""
+        """Extract registered and postal addresses with strict validation."""
         addresses = {
             'registered': {},
             'postal': {}
         }
         
-        # Look for address microformats
-        for addr_tag in soup.find_all('address'):
-            addr_text = addr_tag.get_text(separator=' ', strip=True)
-            if 'registered' in addr_text.lower() or 'sitz' in addr_text.lower():
+        # Look for address microformats - ONLY take FIRST address (primary company)
+        addr_tags = soup.find_all('address')
+        if addr_tags:
+            # Only process first address tag (primary company)
+            first_addr = addr_tags[0]
+            addr_text = first_addr.get_text(separator=' ', strip=True)
+            
+            # Skip if this looks like a partner/third-party section
+            is_partner = False
+            for indicator in self.PARTNER_INDICATORS:
+                if indicator in addr_text.lower():
+                    is_partner = True
+                    break
+            
+            if not is_partner:
                 addresses['registered'] = self.parse_address(addr_text)
-            else:
-                addresses['postal'] = self.parse_address(addr_text)
                 
         # Look for structured data addresses
         for script in soup.find_all('script', type='application/ld+json'):
@@ -312,34 +606,159 @@ class LegalExtractor:
                         addresses['registered'] = parsed
                     break
         
-        # NEW: Direct German address pattern extraction
+        # === INTERNATIONAL ADDRESS PATTERNS ===
+        # Supports: German, Swiss, Austrian, French, Italian, Dutch, Belgian
         if not addresses['registered'].get('street'):
-            # Pattern: "Straße/Weg/Platz NUMBER, ZIP CITY" or "Straße NUMBER ZIP CITY"
-            de_addr_patterns = [
-                # Street Number, ZIP City
-                re.compile(
-                    r'([A-Za-zäöüÄÖÜß\.\-]+(?:straße|str\.|weg|platz|allee|ring|gasse|damm|ufer|chaussee))\s*(\d+[a-zA-Z]?)\s*[,\s]+(\d{5})\s+([A-Za-zäöüÄÖÜß\-]+)',
-                    re.IGNORECASE
-                ),
-                # Street NUMBER\nZIP City (multiline)
-                re.compile(
-                    r'([A-Za-zäöüÄÖÜß\.\-]+(?:straße|str\.|weg|platz|allee|ring|gasse|damm|ufer|chaussee))\s+(\d+[a-zA-Z]?)\s+(\d{5})\s+([A-Za-zäöüÄÖÜß\-]+)',
-                    re.IGNORECASE
-                ),
+            intl_addr_patterns = [
+                # === SWISS FRENCH PATTERNS (4-digit postal, highest priority for .ch) ===
+                # "Rue Jacques-Gachoud 1\n1700 Fribourg" or "Rue de la Paix 15, CH-1200 Genève"
+                (re.compile(
+                    r'((?:Rue|Avenue|Boulevard|Place|Chemin|Route|Ruelle)\s+[A-Za-zàâäéèêëïîôùûüç\s\-\']+)\s+(\d+[a-zA-Z]?)\s*[\n,]\s*(?:CH-?)?(\d{4})\s+([A-Za-zàâäéèêëïîôùûüç\s\-]+)',
+                    re.IGNORECASE | re.MULTILINE
+                ), 'Switzerland'),
+                
+                # === SWISS GERMAN PATTERNS (4-digit postal) ===
+                # "Tellsgasse 16\n6460 Altdorf" or "Bahnhofstrasse 10, CH-8001 Zürich"
+                (re.compile(
+                    r'([A-Za-zäöüÄÖÜß\-]+(?:gasse|strasse|str\.|weg|platz|rain|matt|acher))\s+(\d+[a-zA-Z]?)\s*[\n,]\s*(?:CH-?)?(\d{4})\s+([A-Za-zäöüÄÖÜß\s\-]+)',
+                    re.IGNORECASE | re.MULTILINE
+                ), 'Switzerland'),
+                
+                # === SWISS ITALIAN PATTERNS (4-digit postal) ===
+                # "Via Lugano 25\n6900 Lugano"
+                (re.compile(
+                    r'((?:Via|Viale|Piazza|Corso|Vicolo)\s+[A-Za-zàèéìòù\s\-]+)\s+(\d+[a-zA-Z]?)\s*[\n,]\s*(?:CH-?)?(\d{4})\s+([A-Za-zàèéìòù\s\-]+)',
+                    re.IGNORECASE | re.MULTILINE
+                ), 'Switzerland'),
+                
+                # === GERMAN PATTERNS (5-digit postal) ===
+                # "Salzdahlumer Str. 196\n38126 Braunschweig"
+                (re.compile(
+                    r'([A-Za-zäöüÄÖÜß\-]+\s+(?:Str\.|Straße|Weg|Platz|Allee|Ring|Gasse))\s+(\d+[a-zA-Z]?)\s*[\n,]\s*(\d{5})\s+([A-Za-zäöüÄÖÜß\s\-]+)',
+                    re.IGNORECASE | re.MULTILINE
+                ), 'Germany'),
+                # "Kaiserstraße 56\n60329 Frankfurt"
+                (re.compile(
+                    r'([A-Za-zäöüÄÖÜß\.\-]+(?:straße|str\.?|weg|platz|allee|ring|gasse|damm|ufer|chaussee))\s+(\d+[a-zA-Z]?)\s*[\n,]\s*(\d{5})\s+([A-Za-zäöüÄÖÜß\s\-]+)',
+                    re.IGNORECASE | re.MULTILINE
+                ), 'Germany'),
+                # German named locations: "An der Mühle 3\n31860 Emmerthal"
+                (re.compile(
+                    r'((?:An\s+der|Am|Im|Auf\s+der|Zum|Zur)\s+[A-Za-zäöüÄÖÜß\-]+)\s+(\d+[a-zA-Z]?)\s*[\n,]\s*(\d{5})\s+([A-Za-zäöüÄÖÜß\s\-]+)',
+                    re.IGNORECASE | re.MULTILINE
+                ), 'Germany'),
+                
+                # === AUSTRIAN PATTERNS (4-digit postal with optional A- prefix) ===
+                # "Stephansplatz 1\nA-1010 Wien"
+                (re.compile(
+                    r'([A-Za-zäöüÄÖÜß\-]+(?:gasse|straße|str\.|weg|platz|ring))\s+(\d+[a-zA-Z]?)\s*[\n,]\s*(?:A-?)?(\d{4})\s+([A-Za-zäöüÄÖÜß\s\-]+)',
+                    re.IGNORECASE | re.MULTILINE
+                ), 'Austria'),
+                
+                # === FRENCH PATTERNS (5-digit postal) ===
+                # "15, rue de la Paix\n75001 Paris" or "Rue de Rivoli 25, 75001 Paris"
+                (re.compile(
+                    r'(?:(\d+)[,\s]+)?((?:Rue|Avenue|Boulevard|Av\.|Bd\.|Place|Chemin|Allée|Impasse|Quai)\s+[A-Za-zàâäéèêëïîôùûüç\s\-\']+)\s*(\d*)\s*[\n,]\s*(?:F-?)?(\d{5})\s+([A-Za-zàâäéèêëïîôùûüç\s\-]+)',
+                    re.IGNORECASE | re.MULTILINE
+                ), 'France'),
+                
+                # === ITALIAN PATTERNS (5-digit postal) ===
+                # "Via Roma 25\n00100 Roma"
+                (re.compile(
+                    r'((?:Via|Viale|Piazza|Corso|Largo|Vicolo)\s+[A-Za-zàèéìòù\s\-]+)\s+(\d+[a-zA-Z]?)\s*[\n,]\s*(?:I-?)?(\d{5})\s+([A-Za-zàèéìòù\s\-]+)',
+                    re.IGNORECASE | re.MULTILINE
+                ), 'Italy'),
+                
+                # === DUTCH PATTERNS (4-digit + 2 letters) ===
+                # "Damrak 1\n1012 LG Amsterdam"
+                (re.compile(
+                    r'([A-Za-z\-]+(?:straat|weg|plein|laan|gracht|kade|singel))\s+(\d+[a-zA-Z]?)\s*[\n,]\s*(\d{4}\s*[A-Z]{2})\s+([A-Za-z\s\-]+)',
+                    re.IGNORECASE | re.MULTILINE
+                ), 'Netherlands'),
+                
+                # === BELGIAN PATTERNS (4-digit postal) ===
+                # "Rue de la Loi 16\n1000 Bruxelles"
+                (re.compile(
+                    r'((?:Rue|Avenue|Boulevard|Place|Straat|Laan|Plein)\s+[A-Za-zàâäéèêëïîôùûüç\s\-\']+)\s+(\d+[a-zA-Z]?)\s*[\n,]\s*(?:B-?)?(\d{4})\s+([A-Za-zàâäéèêëïîôùûüç\s\-]+)',
+                    re.IGNORECASE | re.MULTILINE
+                ), 'Belgium'),
+                
+                # === UK PATTERNS (alphanumeric postal) ===
+                # "10 Downing Street\nLondon SW1A 2AA"
+                (re.compile(
+                    r'(\d+[a-zA-Z]?)\s+([A-Za-z\s\-]+(?:Street|St\.|Road|Rd\.|Lane|Ln\.|Avenue|Ave\.|Drive|Way|Place|Square))\s*[\n,]\s*([A-Za-z]+)\s+([A-Z]{1,2}\d[A-Z\d]?\s*\d[A-Z]{2})',
+                    re.IGNORECASE | re.MULTILINE
+                ), 'United Kingdom'),
             ]
-            for pattern in de_addr_patterns:
+            
+            for pattern, country in intl_addr_patterns:
                 match = pattern.search(text)
                 if match:
-                    addresses['registered'] = {
-                        'street': f"{match.group(1)} {match.group(2)}".strip(),
-                        'zip': match.group(3),
-                        'city': match.group(4).strip(),
-                        'state': '',
-                        'country': 'Germany'
-                    }
-                    break
+                    groups = match.groups()
+                    
+                    # Handle French/UK style "15, rue de la Paix" (number before street)
+                    if country == 'France' and groups[0] and groups[0].isdigit():
+                        number = groups[0]
+                        street_name = groups[1].strip()
+                        street = f"{street_name} {number}"
+                        zip_code = groups[3].strip()
+                        city = groups[4].strip()
+                    elif country == 'United Kingdom':
+                        street = f"{groups[0]} {groups[1].strip()}"
+                        city = groups[2].strip()
+                        zip_code = groups[3].strip()
+                    else:
+                        street = f"{groups[0].strip()} {groups[1]}".strip()
+                        zip_code = groups[2].strip()
+                        city = groups[3].strip()
+                    
+                    # Clean city (remove trailing junk)
+                    city = re.split(r'[,\n]', city)[0].strip()
+                    
+                    # Validate before storing
+                    validated_street = self.validate_street(street)
+                    validated_city = self.validate_city(city)
+                    
+                    # Accept 4-digit (CH/AT/NL/BE) or 5-digit (DE/FR/IT) or UK format
+                    zip_clean = re.sub(r'[^0-9A-Z]', '', zip_code.upper())
+                    valid_zip = len(zip_clean) >= 4 and len(zip_clean) <= 8
+                    
+                    if validated_street and validated_city and valid_zip:
+                        addresses['registered'] = {
+                            'street': validated_street,
+                            'zip': zip_code,
+                            'city': validated_city,
+                            'state': '',
+                            'country': country
+                        }
+                        break
                     
         return addresses
+    
+    def _detect_country_from_zip(self, zip_code: str) -> str:
+        """Detect country from postal code format."""
+        zip_clean = zip_code.strip().upper()
+        
+        # Swiss: 4 digits, 1000-9999
+        if re.match(r'^(?:CH-?)?\d{4}$', zip_clean):
+            return 'Switzerland'
+        # German: 5 digits
+        if re.match(r'^\d{5}$', zip_clean):
+            return 'Germany'
+        # French: 5 digits with optional F-
+        if re.match(r'^(?:F-?)?\d{5}$', zip_clean):
+            return 'France'
+        # Austrian: 4 digits with optional A-
+        if re.match(r'^(?:A-?)?\d{4}$', zip_clean):
+            return 'Austria'
+        # Dutch: 4 digits + 2 letters
+        if re.match(r'^\d{4}\s*[A-Z]{2}$', zip_clean):
+            return 'Netherlands'
+        # UK: Various alphanumeric formats
+        if re.match(r'^[A-Z]{1,2}\d[A-Z\d]?\s*\d[A-Z]{2}$', zip_clean):
+            return 'United Kingdom'
+        
+        return ''
 
     def parse_address(self, address_text: str) -> Dict[str, str]:
         """Parse an address string into components with multi-line and international support."""
@@ -605,26 +1024,36 @@ class LegalExtractor:
         try:
             soup = BeautifulSoup(html, 'lxml')
             
-            # Clean HTML
+            # Extract domain for validation
+            parsed_url = urlparse(url)
+            domain = parsed_url.netloc.lower().replace('www.', '')
+            
+            # Clean HTML - remove scripts/styles
             for tag in soup(['script', 'style', 'noscript']):
                 tag.decompose()
-                
-            # Use newline separator to preserve structure for regexes
-            text = soup.get_text(separator='\n', strip=True)
             
-            # Use trafilatura for main content extraction (cleaner text for AI)
-            main_content = trafilatura.extract(html, include_comments=False, include_tables=False)
-            if not main_content:
-                main_content = text # Fallback to full text if extraction fails
+            # Get full text for legal page detection
+            full_text = soup.get_text(separator='\n', strip=True)
             
             # Check if this is a legal page
-            is_legal, confidence = self.is_legal_page(soup, url, text)
+            is_legal, confidence = self.is_legal_page(soup, url, full_text)
             
             if not is_legal:
                 return {
                     'status': 'NOT_LEGAL_PAGE',
                     'confidence': confidence
                 }
+            
+            # === CRITICAL: Isolate Impressum section FIRST ===
+            # This prevents extracting data from partner/third-party sections
+            isolated_soup, isolated_text = self.isolate_impressum_section(soup, url)
+            
+            # Further filter to PRIMARY company block only
+            primary_text = self.extract_primary_company_block(isolated_text, domain)
+            
+            # Use primary_text for extraction (falls back to isolated_text if too short)
+            extraction_text = primary_text if len(primary_text) > 50 else isolated_text
+            extraction_soup = isolated_soup if isolated_soup else soup
                 
             # Extract all legal information
             result = {
@@ -633,110 +1062,118 @@ class LegalExtractor:
                 'legal_notice_url': url
             }
             
-            # --- 1. REGEX EXTRACTION (Baseline) ---
-            # Extract legal form
-            legal_form = self.extract_legal_form(text)
+            # --- 1. REGEX EXTRACTION (on isolated content) ---
+            legal_form = self.extract_legal_form(extraction_text)
             if legal_form:
                 result['legal_form'] = legal_form
                 
-            # Extract registration information
-            registration = self.extract_registration_info(text)
+            registration = self.extract_registration_info(extraction_text)
             result.update(registration)
             
-            # Extract representatives
-            representatives = self.extract_representatives(text)
+            representatives = self.extract_representatives(extraction_text)
             result.update(representatives)
             
-            # Extract addresses
-            addresses = self.extract_addresses(soup, text)
+            # Extract addresses from isolated soup
+            addresses = self.extract_addresses(extraction_soup, extraction_text)
             for addr_type, addr_data in addresses.items():
                 if addr_data:
                     for key, value in addr_data.items():
                         result[f'{addr_type}_{key}'] = value
                         
-            # Extract legal contacts
-            contacts = self.extract_legal_contacts(soup, text)
+            contacts = self.extract_legal_contacts(extraction_soup, extraction_text)
             result.update(contacts)
             
-            # Extract company name from legal context (Regex)
-            legal_name = self.extract_legal_name(text, legal_form)
+            # Extract company name from isolated content
+            legal_name = self.extract_legal_name(extraction_text, legal_form)
             if legal_name:
-                result['legal_name'] = legal_name
+                # Validate company name matches domain
+                if self.validate_company_name_for_domain(legal_name, domain):
+                    result['legal_name'] = legal_name
+                else:
+                    # Try to find a better match in primary text
+                    logger.warning(f"Company name '{legal_name}' may not match domain '{domain}'")
 
-            # --- 2. GLiNER ENHANCEMENT (Override/Enrich) ---
+            # --- 2. GLiNER ENHANCEMENT (on isolated content only) ---
             if self.model:
-                # Use cleaner main content for GLiNER to reduce noise (like sidebar news)
-                gliner_results = self._predict_gliner(main_content)
+                # Use isolated text for GLiNER - NOT full page!
+                gliner_results = self._predict_gliner(extraction_text)
                 
-                # Merge Legal Name (Highest Priority)
+                # Merge Legal Name (with domain validation)
                 if 'organization' in gliner_results:
-                    # Get best score organization
-                    best_org = max(gliner_results['organization'], key=lambda x: x['score'])
-                    # GLiNER is much better at excluding "Adresse: ..." prefixes
-                    # Only override if regex failed or GLiNER is very confident
-                    if not result.get('legal_name') or best_org['score'] > 0.6:
-                        # Apply basic cleaning to GLiNER result just in case
-                        # Disable aggressive stripping for GLiNER results
-                        cleaned_gliner_name = self.clean_legal_name(best_org['text'], aggressive=False)
-                        if cleaned_gliner_name:
-                            result['legal_name'] = cleaned_gliner_name
-                            result['extraction_method'] = 'gliner'
+                    valid_orgs = [
+                        org for org in gliner_results['organization']
+                        if org['text'].lower().strip() not in self.FALSE_POSITIVE_ORGS
+                        and not any(fp in org['text'].lower() for fp in self.FALSE_POSITIVE_ORGS)
+                        and self.validate_company_name_for_domain(org['text'], domain)
+                    ]
+                    
+                    if valid_orgs:
+                        best_org = max(valid_orgs, key=lambda x: x['score'])
+                        if not result.get('legal_name') or best_org['score'] > 0.7:
+                            cleaned_gliner_name = self.clean_legal_name(best_org['text'], aggressive=False)
+                            if cleaned_gliner_name and (
+                                len(cleaned_gliner_name.split()) >= 2 or
+                                any(lf.lower() in cleaned_gliner_name.lower() for lf in ['gmbh', 'ag', 'kg', 'ltd', 'ug', 'ohg'])
+                            ):
+                                result['legal_name'] = cleaned_gliner_name
+                                result['extraction_method'] = 'gliner'
 
-                # Merge Representatives (Persons)
+                # Merge Representatives (Persons) - stricter validation
                 if 'person' in gliner_results:
-                    gliner_persons = [p['text'] for p in gliner_results['person'] if p['score'] > 0.5]
-                    current_directors = result.get('directors', []) + ([result['ceo']] if result.get('ceo') else [])
+                    # Only take high-confidence persons from isolated content
+                    gliner_persons = [p['text'] for p in gliner_results['person'] if p['score'] > 0.6]
                     
-                    # If regex found nothing, take GLiNER persons
-                    if not current_directors and gliner_persons:
-                        # Heuristic: First person is often CEO/MD
-                        result['ceo'] = gliner_persons[0]
-                        if len(gliner_persons) > 1:
-                            result['directors'] = gliner_persons[1:]
+                    # Validate person names
+                    validated_persons = []
+                    for person in gliner_persons:
+                        validated = self.validator.validate_ceo_name(person)
+                        if validated:
+                            validated_persons.append(validated)
                     
-                    # If regex found something, just deduplicate/enrich? 
-                    # Actually, user complained about regex quality. Let's trust GLiNER more if confident.
-                    elif gliner_persons:
-                        # If regex result looks like a title ("Geschäftsführer"), replace it
-                        if result.get('ceo') and any(x in result['ceo'].lower() for x in ['geschäftsführer', 'director', 'manager']):
-                            result['ceo'] = gliner_persons[0]
+                    if not result.get('ceo') and validated_persons:
+                        result['ceo'] = validated_persons[0]
+                        if len(validated_persons) > 1:
+                            result['directors'] = validated_persons[1:]
+                    elif validated_persons and result.get('ceo'):
+                        # Check if regex result looks like a title
+                        if any(x in result['ceo'].lower() for x in ['geschäftsführer', 'director', 'manager', 'vorstand']):
+                            result['ceo'] = validated_persons[0]
 
-                # Merge Address (Street, City, ZIP)
-                # Regex address extraction is brittle. GLiNER is better at components.
-                # Allow partial address extraction (don't require both street AND city)
+                # Merge Address - only from isolated content
                 if 'street_address' in gliner_results:
                     best_street = max(gliner_results['street_address'], key=lambda x: x['score'])
-                    if best_street['score'] > 0.4:
-                        result['registered_street'] = best_street['text']
+                    if best_street['score'] > 0.6:  # Higher threshold
+                        validated_street = self.validate_street(best_street['text'])
+                        if validated_street:
+                            # Only override if no street or current street looks suspicious
+                            current_street = result.get('registered_street', '')
+                            if not current_street or len(current_street) < 5:
+                                result['registered_street'] = validated_street
                 
                 if 'city' in gliner_results:
                     best_city = max(gliner_results['city'], key=lambda x: x['score'])
-                    if best_city['score'] > 0.4:
-                        result['registered_city'] = best_city['text']
+                    if best_city['score'] > 0.6:
+                        validated_city = self.validate_city(best_city['text'])
+                        if validated_city:
+                            result['registered_city'] = validated_city
                 
                 if 'zip_code' in gliner_results:
                     best_zip = max(gliner_results['zip_code'], key=lambda x: x['score'])
-                    if best_zip['score'] > 0.4:
-                        result['registered_zip'] = best_zip['text']
+                    if best_zip['score'] > 0.6:
+                        zip_text = best_zip['text'].strip()
+                        if re.match(r'^\d{4,5}$', zip_text):
+                            result['registered_zip'] = zip_text
 
-                # Sanity check country if we found at least a city
-                if result.get('registered_city') and not result.get('registered_country'):
-                    pass
-                # Sanity check country
-                if result.get('registered_city') and not result.get('registered_country'):
-                    pass
-
-                # Merge Registration Number (HRB/HRA)
+                # Merge Registration Number
                 if 'commercial_register_number' in gliner_results:
                     best_reg = max(gliner_results['commercial_register_number'], key=lambda x: x['score'])
                     if best_reg['score'] > 0.8:
-                        # Check if regex missed it or captured garbage
                         curr_reg = result.get('registration_number')
-                        if not curr_reg or len(curr_reg) > 20: # Garbage regex result
+                        if not curr_reg or len(curr_reg) > 20:
                             result['registration_number'] = best_reg['text']
             
-            # Clean up obvious government/public-sector cases misclassified as GmbH/LLC
-            result = self.sanitize_public_sector(result, url, text)
+            # Clean up public sector misclassifications
+            result = self.sanitize_public_sector(result, url, full_text)
 
             return result
             
